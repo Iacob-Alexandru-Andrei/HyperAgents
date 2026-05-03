@@ -1,10 +1,9 @@
 import asyncio
 import os
 import signal
-import time
 
 
-_MAX_OUTPUT_BYTES = 20_000
+_MAX_OUTPUT_BYTES = 100_000
 
 
 def _truncate_output(text, label):
@@ -14,6 +13,7 @@ def _truncate_output(text, label):
     truncated = data[:_MAX_OUTPUT_BYTES].decode("utf-8", errors="replace")
     omitted = len(data) - _MAX_OUTPUT_BYTES
     return f"{truncated}\n... [{label} truncated: {omitted} more bytes omitted]"
+
 
 def tool_info():
     return {
@@ -41,6 +41,7 @@ def tool_info():
             "required": ["command"]
         }
     }
+
 
 class BashSession:
     """A session of a bash shell."""
@@ -79,30 +80,22 @@ class BashSession:
     async def _kill_process_group(self):
         if self._process is None:
             return
-        self._signal_process_group(signal.SIGTERM)
-        try:
-            await asyncio.wait_for(self._process.wait(), timeout=0.5)
-        except asyncio.TimeoutError:
-            self._signal_process_group(signal.SIGKILL)
+        if self._process.returncode is None:
+            self._signal_process_group(signal.SIGTERM)
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=0.5)
             except asyncio.TimeoutError:
-                pass
+                self._signal_process_group(signal.SIGKILL)
+                try:
+                    await asyncio.wait_for(self._process.wait(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    pass
         self._process = None
         self._pgid = None
         self._started = False
 
-    def stop(self):
-        if not self._started:
-            return
-        if self._process.returncode is None:
-            self._signal_process_group(signal.SIGTERM)
-            time.sleep(0.5)
-            if self._process.returncode is None:
-                self._signal_process_group(signal.SIGKILL)
-        self._process = None
-        self._pgid = None
-        self._started = False
+    async def stop(self):
+        await self._kill_process_group()
 
     async def run(self, command):
         if not self._started:
@@ -112,8 +105,8 @@ class BashSession:
         if self._timed_out:
             raise ValueError(
                 f"Timed out: bash has not returned in {self._timeout} seconds and must be restarted."
-            )
-        
+        )
+
         # Send command
         self._process.stdin.write(
             command.encode() + f"; echo '{self._sentinel}'\n".encode()
@@ -124,7 +117,7 @@ class BashSession:
         try:
             output = ''
             start_time = asyncio.get_event_loop().time()
-            
+
             while True:
                 if asyncio.get_event_loop().time() - start_time > self._timeout:
                     self._timed_out = True
@@ -132,12 +125,12 @@ class BashSession:
                     raise ValueError(
                         f"Timed out: bash has not returned in {self._timeout} seconds and must be restarted."
                     )
-                
+
                 await asyncio.sleep(self._output_delay)
                 # Read from the internal buffer
                 stdout_data = self._process.stdout._buffer.decode(errors='ignore')
                 stderr_data = self._process.stderr._buffer.decode(errors='ignore')
-                
+
                 if self._sentinel in stdout_data:
                     output = stdout_data[: stdout_data.index(self._sentinel)]
                     break
@@ -154,6 +147,7 @@ class BashSession:
         except Exception as e:
             self._timed_out = True
             raise ValueError(str(e))
+
 
 def filter_error(error):
     # Filter out errors that we do not want to see
@@ -178,11 +172,11 @@ def filter_error(error):
         i += 1
     return '\n'.join(filtered_lines).strip()
 
+
 async def tool_function_call(command, interactive=False):
     """Execute a command in the bash shell."""
+    bash_session = BashSession(interactive=interactive)
     try:
-        bash_session = BashSession(interactive=interactive)
-
         if not bash_session._started:
             await bash_session.start()
 
@@ -196,9 +190,13 @@ async def tool_function_call(command, interactive=False):
         return result.strip()
     except Exception as e:
         return f"Error: {str(e)}"
+    finally:
+        await bash_session.stop()
+
 
 def tool_function(command, interactive=False):
     return asyncio.run(tool_function_call(command, interactive=interactive))
+
 
 if __name__ == "__main__":
     # Example usage

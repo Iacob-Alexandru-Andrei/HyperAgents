@@ -306,6 +306,7 @@ def eval_produced_agent(
     container_output_folder,
     gen_output_dir,
     domain,
+    model,
     eval_samples=-1,
     eval_workers=10,
     eval_subset="_filtered_100_train",
@@ -337,6 +338,8 @@ def eval_produced_agent(
             str(eval_workers),
             "--subset",
             eval_subset.replace("_train", f"_{split}"),
+            "--model",
+            model,
         ]
         exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
         log_container_output(exec_result)
@@ -350,6 +353,8 @@ def eval_produced_agent(
             domain,
             "--dname",
             os.path.join(container_output_folder, eval_run_id),
+            "--model",
+            model,
         ]
         exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
         log_container_output(exec_result)
@@ -637,6 +642,7 @@ def generate(
                     eval_workers=eval_workers,
                     eval_subset=eval_subset,
                     eval_test=eval_test,
+                    model=model,
                 )
 
             # Small sample size evaluation for staged eval
