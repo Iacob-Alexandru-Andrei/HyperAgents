@@ -1,2 +1,33 @@
 outputs/
 outputs_os/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+*.egg-info/
+dist/
+build/
+.ipynb_checkpoints/
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Logs / env
+*.log
+.env
+.env.*
+
+# IDE / editor
+.idea/
+.vscode/
+
+# OS metadata
+.DS_Store
+Thumbs.db
