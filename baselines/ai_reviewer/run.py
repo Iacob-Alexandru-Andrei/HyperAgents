@@ -9,6 +9,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run AI reviewer")
     parser.add_argument("--run_id", type=str, default=None, help="Run ID")
     parser.add_argument("--num_samples", type=int, default=-1, help="Number of samples to evaluate, -1 for all")
+    parser.add_argument("--model", type=str, required=True, help="Model to use")
     args = parser.parse_args()
 
     domain = "paper_review"
@@ -16,6 +17,7 @@ if __name__ == "__main__":
     num_samples = args.num_samples
 
     output_folder = harness(
+        model=args.model,
         agent_path="./baselines/ai_reviewer/agent.py",
         output_dir="./baselines/ai_reviewer/outputs",
         run_id=run_id,

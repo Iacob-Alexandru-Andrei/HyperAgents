@@ -46,7 +46,7 @@ from utils.gl_utils import (
 )
 
 
-def run_harness_polyglot(root_dir, output_dir, genid, skip_staged_eval=False, num_samples=-1):
+def run_harness_polyglot(root_dir, output_dir, genid, *, model, skip_staged_eval=False, num_samples=-1):
     # NOTE: the harness for polyglot is different because each task instance needs a docker container
     from domains.polyglot.harness import harness as harness_polyglot
     from domains.polyglot.report import report as report_polyglot
@@ -71,6 +71,7 @@ def run_harness_polyglot(root_dir, output_dir, genid, skip_staged_eval=False, nu
             pred_dname=eval_output_dir,
             output_dir=eval_output_dir,
             root_dir=root_dir,
+            model=model,
         )
         report_polyglot(output_dir=eval_output_dir, run_keyword=model_name_or_path, expected_num_tasks=len(test_task_list))
         stagedeval_score = get_score("polyglot", output_dir, genid)
@@ -90,6 +91,7 @@ def run_harness_polyglot(root_dir, output_dir, genid, skip_staged_eval=False, nu
             pred_dname=eval_output_dir,
             output_dir=eval_output_dir,
             root_dir=root_dir,
+            model=model,
         )
         report_polyglot(output_dir=eval_output_dir, run_keyword=model_name_or_path, expected_num_tasks=len(test_task_list + test_task_list_more))
 
@@ -445,6 +447,8 @@ def generate(
     skip_staged_eval=False,
     edit_select_parent=False,
     max_generation=None,
+    *,
+    model,
 ):
     # Setup local output folder
     prev_gen_dir = os.path.join(output_dir, f"gen_{parent_genid}")
@@ -509,6 +513,7 @@ def generate(
                 from baselines.dgm.utils import get_problem_statement
                 problem_statement = get_problem_statement(
                     root_dir, output_dir, parent_genid, domains,
+                    model=model,
                     customized="custom" in run_baseline,
                 )
 
@@ -562,6 +567,8 @@ def generate(
                     commit_hash,
                     "--outdir",
                     container_agentoutput_folder,
+                    "--model",
+                    model,
                 ]
             else:
                 command = [
@@ -583,10 +590,8 @@ def generate(
                     container_agentoutput_folder,
                     "--iterations_left",
                     str(max_generation - current_genid),
-                    *(
-                        # If domain is polyglot, for a fair comparison with DGM
-                        ["--model", "claude-3-5-sonnet-20241022"] if domains == ["polyglot"] else []
-                    ),
+                    "--model",
+                    model,
                 ]
 
             run_workdir = (
@@ -718,6 +723,8 @@ def generate(
 
 def generate_loop(
     domains,
+    *,
+    model,
     run_id=None,
     max_generation=3,
     eval_samples=-1,
@@ -840,11 +847,12 @@ def generate_loop(
                 skip_staged_eval=skip_staged_eval,
                 edit_select_parent=edit_select_parent,
                 max_generation=max_generation,
+                model=model,
             )
             print(f"generate_loop: generation 0 completed, parent None")
             # Evaluate the agent on polyglot if needed
             if "polyglot" in domains:
-                run_harness_polyglot(root_dir, output_dir, 0, skip_staged_eval=skip_staged_eval, num_samples=eval_samples[domains.index("polyglot")])
+                run_harness_polyglot(root_dir, output_dir, 0, model=model, skip_staged_eval=skip_staged_eval, num_samples=eval_samples[domains.index("polyglot")])
 
         # Evaluate the entire archive as an ensemble
         eval_ensemble = (
@@ -919,6 +927,7 @@ def generate_loop(
             skip_staged_eval=skip_staged_eval,
             edit_select_parent=edit_select_parent,
             max_generation=max_generation,
+            model=model,
         )
 
         # NOTE: need to update and save archive before running ensembling eval
@@ -930,7 +939,7 @@ def generate_loop(
 
         # Evaluate the agent on polyglot if needed
         if "polyglot" in domains:
-            run_harness_polyglot(root_dir, output_dir, current_genid, skip_staged_eval=skip_staged_eval, num_samples=eval_samples[domains.index("polyglot")])
+            run_harness_polyglot(root_dir, output_dir, current_genid, model=model, skip_staged_eval=skip_staged_eval, num_samples=eval_samples[domains.index("polyglot")])
 
         # Evaluate the entire archive as an ensemble
         eval_ensemble = (
@@ -1046,6 +1055,7 @@ if __name__ == "__main__":
         required=True,
         help="One or more domains to evaluate (must be from the allowed list)",
     )
+    parser.add_argument("--model", type=str, required=True, help="Model to use")
     parser.add_argument(
         "--max_generation",
         type=int,
@@ -1168,6 +1178,7 @@ if __name__ == "__main__":
     eval_subsets = [get_domain_eval_subset(d) for d in args.domains]
     output_dir = generate_loop(
         domains=args.domains,
+        model=args.model,
         run_id=args.run_id,
         max_generation=args.max_generation,
         eval_samples=eval_samples,

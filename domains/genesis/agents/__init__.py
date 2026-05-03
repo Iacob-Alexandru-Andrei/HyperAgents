@@ -5,7 +5,6 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), "../../.."))
 
 from task_agent import TaskAgent
-from agent.llm import CLAUDE_MODEL
 
 
 class AgentFactory:
@@ -16,19 +15,20 @@ class AgentFactory:
     prompt builder.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, model):
         """Initialize the AgentFactory with configuration settings.
 
         Args:
             config (omegaconf.DictConfig): Configuration object containing settings for the agent and client.
         """
         self.config = config
+        self.model = model
 
     def create_agent(self, chat_history_file):
         """
         Create an agent instance with output to the chat history file.
         """
         return TaskAgent(
-            model=CLAUDE_MODEL,
+            model=self.model,
             chat_history_file=chat_history_file,
         )

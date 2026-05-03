@@ -90,7 +90,7 @@ def process_tool_call(tools_dict, tool_name, tool_input):
 
 def chat_with_agent(
     msg,
-    model="claude-4-sonnet-genai",
+    model,
     msg_history=None,
     logging=print,
     tools_available=[],  # Empty list means no tools, 'all' means all tools
@@ -174,5 +174,11 @@ def chat_with_agent(
     return new_msg_history
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", required=True, help="Model to use")
+    args = parser.parse_args()
+
     msg = """hello"""
-    new_msg_history = chat_with_agent(msg)
+    new_msg_history = chat_with_agent(msg, model=args.model)

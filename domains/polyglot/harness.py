@@ -30,7 +30,7 @@ from domains.polyglot.utils import (
 def get_eval_script(commands):
     return "\n".join(["#!/bin/bash", "set -uxo pipefail"] + commands) + "\n"
 
-def process_entry(entry, out_dname, model_name_or_path, model_patch_paths, root_dir):
+def process_entry(entry, out_dname, model_name_or_path, model_patch_paths, root_dir, model):
     """
     Process a single dataset entry. This function encapsulates the main processing logic
     for each entry to make it suitable for parallel execution.
@@ -117,7 +117,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths, root_
             "--outdir", f"/{REPO_NAME}/",
             "--test_description", test_description,
             "--language", entry['language'],
-            "--model", "o3-mini",
+            "--model", model,
         ]
         exec_result = container.exec_run(cmd, environment=env_vars, workdir='/testbed/')
         log_container_output(exec_result)
@@ -245,6 +245,8 @@ def harness(
         pred_dname='./outputs',
         output_dir='./outputs',
         root_dir=None,
+        *,
+        model,
     ):
     """
     Parallel processing harness using ThreadPoolExecutor.
@@ -308,7 +310,7 @@ def harness(
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             future_to_entry = {
-                executor.submit(process_entry, entry, out_dname, model_name_or_path_inst, model_patch_paths, root_dir): entry
+                executor.submit(process_entry, entry, out_dname, model_name_or_path_inst, model_patch_paths, root_dir, model): entry
                 for entry in entries
             }
             
@@ -390,6 +392,7 @@ def main():
     parser.add_argument("--max_workers", type=int, default=5, help="Maximum number of concurrent threads")
     parser.add_argument("--model_name_or_path", type=str, default=None, help="Model name or path")
     parser.add_argument("--model_patch_paths", type=str, default=None, help="Paths to the model patches")
+    parser.add_argument("--model", type=str, required=True, help="Model to use")
     parser.add_argument("--num_evals", type=int, default=1, help="Repeated number of swe evaluations")
     parser.add_argument("--num_evals_parallel", type=int, default=1, help="Number of parallel repeated evaluations")
     parser.add_argument("--output_dir", type=str, default="./outputs", help="Output directory")
@@ -421,6 +424,7 @@ def main():
         num_evals_parallel=args.num_evals_parallel,
         pred_dname=args.output_dir,
         output_dir=args.output_dir,
+        model=args.model,
     )
 
 if __name__ == "__main__":

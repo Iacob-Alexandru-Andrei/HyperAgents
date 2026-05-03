@@ -15,6 +15,13 @@ from hydra.utils import get_original_cwd
 from omegaconf import DictConfig
 
 
+def _require_model_from_config(config):
+    try:
+        return config.agent.model
+    except Exception as exc:
+        raise ValueError("Pass an explicit model, e.g. +agent.model=<model>.") from exc
+
+
 @contextmanager
 def redirect_to_file(filepath):
     original = sys.stdout
@@ -31,7 +38,7 @@ def report_genesis(output_dir):
     return summary
 
 
-def harness_genesis(config):
+def harness_genesis(config, model):
     # original_cwd = get_original_cwd()
     original_cwd = ""
 
@@ -64,7 +71,7 @@ def harness_genesis(config):
     evaluator_manager = EvaluatorManager(
         config, original_cwd=original_cwd, output_dir=output_dir
     )
-    agent_factory = AgentFactory(config)
+    agent_factory = AgentFactory(config, model=model)
     with redirect_to_file(log_filename):
         evaluator_manager.run(agent_factory)
 
@@ -74,7 +81,7 @@ def harness_genesis(config):
 @hydra.main(config_path="config", config_name="config", version_base="1.1")
 def main(config: DictConfig):
     # Harness
-    output_dir = harness_genesis(config)
+    output_dir = harness_genesis(config, model=_require_model_from_config(config))
     # Report
     report_genesis(output_dir)
 

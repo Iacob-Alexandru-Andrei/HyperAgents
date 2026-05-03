@@ -8,7 +8,6 @@ import os
 import threading
 
 from agent.llm_withtools import chat_with_agent
-from agent.llm import CLAUDE_MODEL
 from utils.git_utils import diff_versus_commit, reset_to_commit, apply_patch, reset_paths_to_commit
 
 # Thread-local storage for logger instances
@@ -71,6 +70,7 @@ class CodingAgent:
             problem_statement,
             git_tempdir,
             base_commit,
+            code_model,
             chat_history_file='./chat_history.md',
             self_improve=False,
         ):
@@ -79,7 +79,7 @@ class CodingAgent:
         self.base_commit = base_commit
         self.chat_history_file = chat_history_file
         self.self_improve = self_improve
-        self.code_model = CLAUDE_MODEL
+        self.code_model = code_model
 
         # Initialize logger and store it in thread-local storage
         self.logger = setup_logger(chat_history_file)
@@ -108,6 +108,7 @@ def main():
     parser.add_argument('--git_dir', required=True, help='Path to git repository directory')
     parser.add_argument('--base_commit', required=True, help='Base commit hash to compare against')
     parser.add_argument('--chat_history_file', required=True, help='Path to chat history file')
+    parser.add_argument('--model', required=True, help='Model to use')
     parser.add_argument('--outdir', required=False, default="/dgm/", help='Output directory')
     parser.add_argument('--self_improve', default=False, action='store_true', help='Whether to self-improve the repository or solving swe')
     args = parser.parse_args()
@@ -117,6 +118,7 @@ def main():
         problem_statement=args.problem_statement,
         git_tempdir=args.git_dir,
         base_commit=args.base_commit,
+        code_model=args.model,
         chat_history_file=args.chat_history_file,
         self_improve=args.self_improve,
     )

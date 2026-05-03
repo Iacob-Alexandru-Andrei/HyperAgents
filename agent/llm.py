@@ -10,21 +10,6 @@ load_dotenv()
 
 MAX_TOKENS = 16384
 
-CLAUDE_MODEL = "anthropic/claude-sonnet-4-5-20250929"
-CLAUDE_HAIKU_MODEL = "anthropic/claude-3-haiku-20240307"
-CLAUDE_35NEW_MODEL = "anthropic/claude-3-5-sonnet-20241022"
-OPENAI_MODEL = "openai/gpt-4o"
-OPENAI_MINI_MODEL = "openai/gpt-4o-mini"
-OPENAI_O3_MODEL = "openai/o3"
-OPENAI_O3MINI_MODEL = "openai/o3-mini"
-OPENAI_O4MINI_MODEL = "openai/o4-mini"
-OPENAI_GPT52_MODEL = "openai/gpt-5.2"
-OPENAI_GPT5_MODEL = "openai/gpt-5"
-OPENAI_GPT5MINI_MODEL = "openai/gpt-5-mini"
-GEMINI_3_MODEL = "gemini/gemini-3-pro-preview"
-GEMINI_MODEL = "gemini/gemini-2.5-pro"
-GEMINI_FLASH_MODEL = "gemini/gemini-2.5-flash"
-
 litellm.drop_params=True
 
 @backoff.on_exception(
@@ -35,7 +20,7 @@ litellm.drop_params=True
 )
 def get_response_from_llm(
     msg: str,
-    model: str = OPENAI_MODEL,
+    model: str,
     temperature: float = 0.0,
     max_tokens: int = MAX_TOKENS,
     msg_history=None,
@@ -88,29 +73,12 @@ def get_response_from_llm(
 
 
 if __name__ == "__main__":
-    msg = 'Hello there!'
-    models = [
-        ("CLAUDE_MODEL", CLAUDE_MODEL),
-        ("CLAUDE_HAIKU_MODEL", CLAUDE_HAIKU_MODEL),
-        ("CLAUDE_35NEW_MODEL", CLAUDE_35NEW_MODEL),
-        ("OPENAI_MODEL", OPENAI_MODEL),
-        ("OPENAI_MINI_MODEL", OPENAI_MINI_MODEL),
-        ("OPENAI_O3_MODEL", OPENAI_O3_MODEL),
-        ("OPENAI_O3MINI_MODEL", OPENAI_O3MINI_MODEL),
-        ("OPENAI_O4MINI_MODEL", OPENAI_O4MINI_MODEL),
-        ("OPENAI_GPT52_MODEL", OPENAI_GPT52_MODEL),
-        ("OPENAI_GPT5_MODEL", OPENAI_GPT5_MODEL),
-        ("OPENAI_GPT5MINI_MODEL", OPENAI_GPT5MINI_MODEL),
-        ("GEMINI_3_MODEL", GEMINI_3_MODEL),
-        ("GEMINI_MODEL", GEMINI_MODEL),
-        ("GEMINI_FLASH_MODEL", GEMINI_FLASH_MODEL),
-    ]
-    for name, model in models:
-        print(f"\n{'='*50}")
-        print(f"Testing {name}: {model}")
-        print('='*50)
-        try:
-            output_msg, msg_history, info = get_response_from_llm(msg, model=model)
-            print(f"OK: {output_msg[:100]}...")
-        except Exception as e:
-            print(f"FAIL: {str(e)[:200]}")
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", required=True, help="Model to test")
+    parser.add_argument("--msg", default="Hello there!", help="Message to send")
+    args = parser.parse_args()
+
+    output_msg, msg_history, info = get_response_from_llm(args.msg, model=args.model)
+    print(output_msg)
