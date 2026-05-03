@@ -413,8 +413,14 @@ class TaskAgent(AgentSystem):
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", required=True, help="Model to use")
+    args = parser.parse_args()
+
     # Example usage
-    agent = TaskAgent(model="gpt-4o-mini-genai")
+    agent = TaskAgent(model=args.model)
 
     # Example: load from CSV as in your skeleton
     import pandas as pd

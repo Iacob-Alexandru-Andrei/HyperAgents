@@ -58,6 +58,7 @@ def load_task_agent(agent_path: str):
     return mod.TaskAgent
 
 def harness(
+    model,
     agent_path="./task_agent.py",
     output_dir="./outputs",
     run_id=None,
@@ -76,7 +77,6 @@ def harness(
     utils_module = importlib.import_module(utils_module_path)
     format_input_dict = utils_module.format_input_dict
     question_id_col = utils_module.QUESTION_ID
-    model = utils_module.MODEL
 
     # Load TaskAgent either from a file path or an importable module path
     TaskAgent = load_task_agent(agent_path)
@@ -216,6 +216,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--proofs_dname", type=str, default="", help="Path to the directory containing proofs to grade (for imo_proof_grading)"
     )
+    parser.add_argument("--model", type=str, required=True, help="Model to use")
     args = parser.parse_args()
 
     domain = args.domain
@@ -226,6 +227,7 @@ if __name__ == "__main__":
     # Human preferences domains
     if domain in ["search_arena", "paper_review", "imo_grading", "imo_proof", "imo_proof_grading"]:
         output_folder = harness(
+            model=args.model,
             agent_path=args.agent_path,
             output_dir=args.output_dir,
             run_id=args.run_id,
@@ -264,7 +266,7 @@ if __name__ == "__main__":
                     else []
                 ),
             )
-            output_folder = harness_balrog(cfg)
+            output_folder = harness_balrog(cfg, model=args.model)
             # Save cfg in output folder
             from omegaconf import OmegaConf
             OmegaConf.save(config=cfg, f=os.path.join(output_folder, "config.yaml"))
@@ -293,7 +295,7 @@ if __name__ == "__main__":
                     else []
                 )
             )
-            output_folder = harness_genesis(cfg)
+            output_folder = harness_genesis(cfg, model=args.model)
             # Save cfg in output folder
             from omegaconf import OmegaConf
             OmegaConf.save(config=cfg, f=os.path.join(output_folder, "config.yaml"))

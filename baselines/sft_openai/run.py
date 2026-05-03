@@ -36,10 +36,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple, Optional, Set
 from openai import OpenAI
 
-BASE_MODEL = "gpt-4o-2024-08-06"
-# BASE_MODEL = "gpt-4o-mini-2024-07-18"
-# BASE_MODEL = "gpt-4.1-2025-04-14"
-
 # These are assigned dynamically from --domain in main()
 DATASET_PATH: Optional[str] = None
 VALIDATION_PATH: Optional[str] = None
@@ -352,12 +348,14 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--domain", type=str, required=True, choices=["search_arena", "paper_review"], help="Domain to finetune on")
+    ap.add_argument("--base-model", type=str, required=True, help="Base model to fine-tune")
     ap.add_argument("--resume", type=str, default=None, help="Path to baselines/sft_openai/outputs/<domain>_<RUN_ID> to resume a run")
     ap.add_argument("--poll-secs", type=int, default=10, help="Polling interval in seconds")
     ap.add_argument("--no-eval", action="store_true", help="Skip evaluation phase")
     ap.add_argument("--force-eval", action="store_true", help="Re-run evaluation even if eval_summary.json exists")
     ap.add_argument("--no-val", action="store_true", help="Do not use a validation file")
     args = ap.parse_args()
+    base_model = args.base_model
 
     # Resolve dataset paths from domain
     DOMAIN = args.domain
@@ -386,7 +384,7 @@ def main():
         is_resume = False
 
     logger, LOG_FILE = setup_logger(run_dir)
-    log_header(run_dir, BASE_MODEL, DOMAIN)
+    log_header(run_dir, base_model, DOMAIN)
     poll_secs = max(1, args.poll_secs)
 
     # Common paths
@@ -414,9 +412,9 @@ def main():
         if not args.no_val:
             val_file_id = upload_file(client, VALIDATION_PATH)
 
-        logger.info(f"Creating fine-tune job on base model: {BASE_MODEL}")
+        logger.info(f"Creating fine-tune job on base model: {base_model}")
         job = client.fine_tuning.jobs.create(
-            model=BASE_MODEL,
+            model=base_model,
             training_file=train_file_id,
             validation_file=val_file_id if val_file_id else None,
             # hyperparameters={"n_epochs": 3, "batch_size": 1, "learning_rate_multiplier": 1.0},

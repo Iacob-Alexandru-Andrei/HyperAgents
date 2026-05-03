@@ -6,7 +6,7 @@ import random
 import pandas as pd
 import importlib
 
-from agent.llm import get_response_from_llm, CLAUDE_MODEL
+from agent.llm import get_response_from_llm
 from utils.common import extract_jsons, read_file
 from utils.docker_utils import safe_log
 
@@ -227,7 +227,7 @@ def get_failed_entry_info(output_dir, gen_id, domain):
     return task_info, md_log, report
 
 
-def get_problem_statement(root_dir, output_dir, gen_id, domains, customized=False, max_attempts=3):
+def get_problem_statement(root_dir, output_dir, gen_id, domains, model, customized=False, max_attempts=3):
     # Get info for a failed entry
     domain = random.choice(domains)
     task_info, md_log, report = get_failed_entry_info(output_dir, gen_id, domain)
@@ -243,7 +243,7 @@ def get_problem_statement(root_dir, output_dir, gen_id, domains, customized=Fals
     )
     try:
         safe_log(f"Diagnose prompt: {repr(diagnose_prompt)}")
-        response, _, _ = get_response_from_llm(msg=diagnose_prompt, model=CLAUDE_MODEL)
+        response, _, _ = get_response_from_llm(msg=diagnose_prompt, model=model)
         safe_log(f"Diagnose response: {repr(response)}")
         response_json = extract_jsons(response)[-1]
         assert response_json, "empty response json"
@@ -253,7 +253,15 @@ def get_problem_statement(root_dir, output_dir, gen_id, domains, customized=Fals
         # Exception most probably due to not having json in the response
         safe_log(f"Error while diagnosing the problem: {e}")
         if max_attempts > 0:
-            return get_problem_statement(output_dir, gen_id, domains, max_attempts=max_attempts-1)
+            return get_problem_statement(
+                root_dir,
+                output_dir,
+                gen_id,
+                domains,
+                model=model,
+                customized=customized,
+                max_attempts=max_attempts - 1,
+            )
         else:
             return None
 

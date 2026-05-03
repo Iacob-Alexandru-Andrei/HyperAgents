@@ -114,8 +114,14 @@ class TaskAgent(AgentSystem):
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", required=True, help="Model to use")
+    args = parser.parse_args()
+
     # Test the proofautograder
-    grader = TaskAgent(model="gemini-2-5-pro")
+    grader = TaskAgent(model=args.model)
 
     # Load dataset
     import pandas as pd

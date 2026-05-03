@@ -162,7 +162,7 @@ def resolve_dirname(dirname, use_single_prior, make_new):
 def main(
     dirnames: Optional[List[str]] = typer.Argument(None, help="Directory names"),
     graphs: bool = typer.Option(False, "--graphs", help="Generate graphs"),
-    model: str = typer.Option("gpt-3.5-turbo", "--model", "-m", help="Model name"),
+    model: str = typer.Option(..., "--model", "-m", help="Model name"),
     sleep: float = typer.Option(
         0, "--sleep", help="Sleep seconds between tests when single threaded"
     ),

@@ -14,7 +14,7 @@ def main():
     parser.add_argument('--outdir', required=False, default="/dgm/", help='Output directory')
     parser.add_argument('--test_description', default=None, required=False, help='Description of how to test the repository')
     parser.add_argument('--language', default=None, required=False, help='Coding language of the repository')
-    parser.add_argument('--model', required=False, default="o3-mini", help='LLM model to use')
+    parser.add_argument('--model', required=True, help='LLM model to use')
     args = parser.parse_args()
 
     # Process the repository
