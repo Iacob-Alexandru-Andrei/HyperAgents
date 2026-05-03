@@ -20,6 +20,8 @@ from utils.gl_utils import apply_diffs_container, setup_initial_gen
 def run_eval(
     output_dir,
     domain,
+    *,
+    model,
     run_id=None,
     num_samples=-1,
     num_workers=5,
@@ -85,6 +87,8 @@ def run_eval(
             str(num_workers),
             "--subset",
             subset,
+            "--model",
+            model,
         ]
         exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
         log_container_output(exec_result)
@@ -98,6 +102,8 @@ def run_eval(
             domain,
             "--dname",
             os.path.join(container_output_folder, eval_run_id),
+            "--model",
+            model,
         ]
         exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
         log_container_output(exec_result)
@@ -170,6 +176,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--copy_root_dir", type=str, default=None, help="Path to a root dir to copy"
     )
+    parser.add_argument("--model", type=str, required=True, help="Model to use")
     args = parser.parse_args()
 
     base_run_id = args.run_id
@@ -186,6 +193,7 @@ if __name__ == "__main__":
             run_eval(
                 output_dir=args.output_dir,
                 domain=domain,
+                model=args.model,
                 run_id=run_id,
                 num_samples=args.num_samples,
                 num_workers=args.num_workers,
