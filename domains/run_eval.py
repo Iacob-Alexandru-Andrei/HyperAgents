@@ -52,7 +52,7 @@ def run_eval(
     # Create and start the Docker container
     image_name = f"{REPO_NAME}"
     container_name = f"{REPO_NAME}-{domain}-eval-container-{run_id}"
-    client = docker.DockerClient()
+    client = docker.from_env()
     container = build_container(
         client, root_dir, image_name, container_name, domains=[domain],
     )
