@@ -1,6 +1,10 @@
+HUMAN_PREFERENCE_DOMAINS = {"search_arena", "paper_review", "paper_writer_review"}
+HUMAN_PREFERENCE_AND_GRADING_DOMAINS = {*HUMAN_PREFERENCE_DOMAINS, "imo_grading"}
+
+
 def get_domain_score_key(domain):
     # Human preferences domains
-    if domain in ["search_arena", "paper_review", "imo_grading"]:
+    if domain in HUMAN_PREFERENCE_AND_GRADING_DOMAINS:
         return "overall_accuracy"
     # Balrog game domains
     elif "balrog" in domain:
@@ -18,7 +22,7 @@ def get_domain_score_key(domain):
 
 def get_domain_splits(domain, eval_test=False):
     # Human preferences domains
-    if domain in ["search_arena", "paper_review", "imo_grading"]:
+    if domain in HUMAN_PREFERENCE_AND_GRADING_DOMAINS:
         splits = ["train", "val"]
         if eval_test:
             splits.append("test")
@@ -39,7 +43,7 @@ def get_domain_splits(domain, eval_test=False):
 
 def can_domain_ensembled(domain):
     # Human preferences domains
-    if domain in ["search_arena", "paper_review"]:
+    if domain in HUMAN_PREFERENCE_DOMAINS:
         return True
     # Balrog game domains
     elif "balrog" in domain:
@@ -60,7 +64,7 @@ def can_domain_ensembled(domain):
 
 def get_domain_eval_subset(domain):
     # Human preferences domains
-    if domain in ["search_arena", "paper_review"]:
+    if domain in HUMAN_PREFERENCE_DOMAINS:
         return "_filtered_100_train"
     # Balrog game domains
     elif "balrog" in domain:
@@ -81,7 +85,7 @@ def get_domain_eval_subset(domain):
 
 def get_domain_test_subset(domain):
     # Human preferences domains
-    if domain in ["search_arena", "paper_review"]:
+    if domain in HUMAN_PREFERENCE_DOMAINS:
         return "_filtered_100_test"
     # Balrog game domains
     elif "balrog" in domain:
@@ -102,7 +106,7 @@ def get_domain_test_subset(domain):
 
 def get_domain_stagedeval_samples(domain):
     # Human preferences domains
-    if domain in ["search_arena", "paper_review"]:
+    if domain in HUMAN_PREFERENCE_DOMAINS:
         return 10
     # Balrog game domains
     elif "balrog" in domain:
@@ -124,7 +128,7 @@ def get_domain_stagedeval_samples(domain):
 def get_domain_stagedeval_frac(domain):
     # NOTE: this is hardcoded wrt get_domain_stagedeval_samples and default domain configs
     # Human preferences domains
-    if domain in ["search_arena", "paper_review"]:
+    if domain in HUMAN_PREFERENCE_DOMAINS:
         return 10/100
     # Balrog game domains
     elif "balrog_babyai" in domain:
@@ -147,7 +151,7 @@ def get_domain_stagedeval_frac(domain):
 
 def has_domain_val_subset(domain):
     # Human preferences domains
-    if domain in ["search_arena", "paper_review"]:
+    if domain in HUMAN_PREFERENCE_DOMAINS:
         return True
     # Balrog game domains
     elif "balrog" in domain:

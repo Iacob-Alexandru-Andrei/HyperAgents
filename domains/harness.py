@@ -13,12 +13,16 @@ from datetime import datetime
 import pandas as pd
 from types import ModuleType
 
+from utils.domain_utils import HUMAN_PREFERENCE_DOMAINS
+
+REVIEW_DATASET_DOMAINS = HUMAN_PREFERENCE_DOMAINS
+
 
 def get_dataset(domain, subset=""):
     df = None
     if "imo_" in domain:
         df = pd.read_csv(f"./domains/imo/{domain.split('_')[-1]}bench{subset}.csv", dtype=str)
-    elif domain in ["search_arena", "paper_review"]:
+    elif domain in REVIEW_DATASET_DOMAINS:
         df = pd.read_csv(f"./domains/{domain}/dataset{subset}.csv", dtype=str)
     return df
 
@@ -177,6 +181,7 @@ if __name__ == "__main__":
         choices=[
             "search_arena",
             "paper_review",
+            "paper_writer_review",
             "balrog_babyai",
             "balrog_babaisai",
             "balrog_minihack",
@@ -224,7 +229,12 @@ if __name__ == "__main__":
         parser.error("--proofs_dname is required when domain is 'imo_proof_grading'")
 
     # Human preferences domains
-    if domain in ["search_arena", "paper_review", "imo_grading", "imo_proof", "imo_proof_grading"]:
+    if domain in {
+        *HUMAN_PREFERENCE_DOMAINS,
+        "imo_grading",
+        "imo_proof",
+        "imo_proof_grading",
+    }:
         output_folder = harness(
             model=args.model,
             agent_path=args.agent_path,

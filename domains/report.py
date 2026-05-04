@@ -10,6 +10,10 @@ import importlib.util
 import json
 import pandas as pd
 
+from utils.domain_utils import HUMAN_PREFERENCE_AND_GRADING_DOMAINS
+
+REPORT_DATASET_DOMAINS = HUMAN_PREFERENCE_AND_GRADING_DOMAINS
+
 
 def report(
     dname,
@@ -166,6 +170,7 @@ if __name__ == "__main__":
         choices=[
             "search_arena",
             "paper_review",
+            "paper_writer_review",
             "balrog_babyai",
             "balrog_babaisai",
             "balrog_minihack",
@@ -186,7 +191,7 @@ if __name__ == "__main__":
     domain = args.domain
 
     # Human preferences domains
-    if domain in ["search_arena", "paper_review", "imo_grading"]:
+    if domain in REPORT_DATASET_DOMAINS:
         report(dname=args.dname, domain=args.domain)
 
     elif domain == "imo_proof":
