@@ -273,6 +273,7 @@ if __name__ == "__main__":
 
     # Genesis Robotic Control Domains
     elif "genesis" in domain:
+        from hydra import compose, initialize_config_dir
         from domains.genesis.eval import harness_genesis
 
         env_name = domain.split("_")[-1]

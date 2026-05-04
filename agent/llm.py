@@ -22,7 +22,10 @@ def parse_openai_endpoint_model(model: str) -> tuple[str, dict[str, str]]:
         raise ValueError("Endpoint-routed model must include a model before '@'")
     if not api_base:
         raise ValueError("Endpoint-routed model must include an API base after '@'")
-    return routed_model, {"api_base": api_base, "api_key": "local"}
+    return routed_model, {
+        "api_base": api_base,
+        "api_key": os.getenv("OPENAI_API_KEY", "local"),
+    }
 
 
 @backoff.on_exception(
