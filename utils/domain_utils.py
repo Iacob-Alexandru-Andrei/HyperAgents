@@ -1,9 +1,10 @@
 HUMAN_PREFERENCE_DOMAINS = {"search_arena", "paper_review", "paper_writer_review"}
+HUMAN_PREFERENCE_AND_GRADING_DOMAINS = {*HUMAN_PREFERENCE_DOMAINS, "imo_grading"}
 
 
 def get_domain_score_key(domain):
     # Human preferences domains
-    if domain in {*HUMAN_PREFERENCE_DOMAINS, "imo_grading"}:
+    if domain in HUMAN_PREFERENCE_AND_GRADING_DOMAINS:
         return "overall_accuracy"
     # Balrog game domains
     elif "balrog" in domain:
@@ -21,7 +22,7 @@ def get_domain_score_key(domain):
 
 def get_domain_splits(domain, eval_test=False):
     # Human preferences domains
-    if domain in {*HUMAN_PREFERENCE_DOMAINS, "imo_grading"}:
+    if domain in HUMAN_PREFERENCE_AND_GRADING_DOMAINS:
         splits = ["train", "val"]
         if eval_test:
             splits.append("test")

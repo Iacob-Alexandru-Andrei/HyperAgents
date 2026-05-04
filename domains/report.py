@@ -10,7 +10,9 @@ import importlib.util
 import json
 import pandas as pd
 
-REPORT_DATASET_DOMAINS = {"search_arena", "paper_review", "paper_writer_review", "imo_grading"}
+from utils.domain_utils import HUMAN_PREFERENCE_AND_GRADING_DOMAINS
+
+REPORT_DATASET_DOMAINS = HUMAN_PREFERENCE_AND_GRADING_DOMAINS
 
 
 def report(
