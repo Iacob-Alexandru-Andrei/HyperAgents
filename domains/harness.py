@@ -14,11 +14,14 @@ import pandas as pd
 from types import ModuleType
 
 
+REVIEW_DATASET_DOMAINS = {"paper_review", "paper_writer_review", "search_arena"}
+
+
 def get_dataset(domain, subset=""):
     df = None
     if "imo_" in domain:
         df = pd.read_csv(f"./domains/imo/{domain.split('_')[-1]}bench{subset}.csv", dtype=str)
-    elif domain in ["search_arena", "paper_review"]:
+    elif domain in REVIEW_DATASET_DOMAINS:
         df = pd.read_csv(f"./domains/{domain}/dataset{subset}.csv", dtype=str)
     return df
 
@@ -177,6 +180,7 @@ if __name__ == "__main__":
         choices=[
             "search_arena",
             "paper_review",
+            "paper_writer_review",
             "balrog_babyai",
             "balrog_babaisai",
             "balrog_minihack",
