@@ -9,6 +9,7 @@ import os
 import random
 import re
 import shutil
+import subprocess
 
 import numpy as np
 
@@ -347,6 +348,20 @@ def setup_initial_gen(
     else:
         shutil.copytree("./", root_dir, dirs_exist_ok=True, ignore=ignore_function)
         shutil.copytree("./domains", os.path.join(root_dir, "domains"), dirs_exist_ok=True, ignore=ignore_function_domains)
+
+    git_check = subprocess.run(
+        ["git", "-C", root_dir, "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if git_check.returncode != 0:
+        dotgit = os.path.join(root_dir, ".git")
+        if os.path.isdir(dotgit):
+            shutil.rmtree(dotgit)
+        elif os.path.exists(dotgit):
+            os.remove(dotgit)
+        subprocess.run(["git", "-C", root_dir, "init"], check=True)
 
     # Setup README.md
     readme_path = os.path.join(root_dir, "README.md")

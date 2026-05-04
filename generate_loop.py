@@ -751,7 +751,7 @@ def generate_loop(
     edit_select_parent=False,
 ):
     # Initialization
-    docker_client = docker.DockerClient()
+    docker_client = docker.from_env()
     parent_selection = "latest" if run_baseline == "no_archive" else parent_selection
     if resume_from:
         output_dir = os.path.normpath(os.path.abspath(resume_from))

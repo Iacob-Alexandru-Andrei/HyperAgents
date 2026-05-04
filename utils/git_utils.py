@@ -164,13 +164,7 @@ def commit_repo(git_dname, commit_message="a nonsense commit message", user_name
             print(f"commit_repo error (commit): {result_commit.stderr}")
             return None
 
-    # Extract the commit hash from stdout
-    parts = result_commit.stdout.strip().split()
-    if len(parts) >= 2:
-        raw_hash = parts[1].strip("[]")
-        return raw_hash
-    else:
-        return get_git_commit_hash(git_dname)
+    return get_git_commit_hash(git_dname)
 
 if __name__ == "__main__":
     # Get the current commit hash

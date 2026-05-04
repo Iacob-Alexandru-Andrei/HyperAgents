@@ -11,7 +11,6 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import pandas as pd
-from hydra import compose, initialize_config_dir
 from types import ModuleType
 
 
@@ -242,6 +241,7 @@ if __name__ == "__main__":
 
     # Balrog game domains
     elif "balrog" in domain:
+        from hydra import compose, initialize_config_dir
         from domains.balrog.eval import harness_balrog
 
         env_name = domain.split("_")[-1]
@@ -273,6 +273,7 @@ if __name__ == "__main__":
 
     # Genesis Robotic Control Domains
     elif "genesis" in domain:
+        from hydra import compose, initialize_config_dir
         from domains.genesis.eval import harness_genesis
 
         env_name = domain.split("_")[-1]
