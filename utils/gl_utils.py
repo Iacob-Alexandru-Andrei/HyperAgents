@@ -120,7 +120,7 @@ def binary_outcomes_from_report(report):
     if resolved is not None and submitted is not None:
         return _binary_outcomes_from_counts(resolved, submitted)
 
-    return []
+    return None
 
 
 def _binary_outcomes_from_counts(correct, total):
