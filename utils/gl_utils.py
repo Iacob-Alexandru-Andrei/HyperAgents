@@ -219,7 +219,6 @@ def setup_initial_gen(
     optimize_option="only_agent",
     run_baseline=None,
     eval_test=False,
-    edit_select_parent=False,
 ):
     # Resume from previous run
     if resume:
@@ -287,7 +286,7 @@ def setup_initial_gen(
     excluded_patterns = ["venv*", "__pycache__*", "*.png", "outputs_os*"]
     if "ensemble" not in optimize_option or not any(can_domain_ensembled(d) for d in domains) and not copy_root_dir:
         excluded_patterns.append("*ensemble*")
-    if not edit_select_parent and not copy_root_dir:
+    if not copy_root_dir:
         excluded_patterns.append("*select_next_parent*")
 
     # Define exclusion criteria for domains
@@ -368,7 +367,6 @@ def setup_initial_gen(
     with open(readme_path, "w", encoding="utf-8") as f:
         readme_desc = get_readme_description(
             ensemble="ensemble" in optimize_option,
-            edit_select_parent=edit_select_parent,
         )
         f.write(readme_desc)
 
@@ -385,7 +383,7 @@ def setup_initial_gen(
     return root_dir, commit_hash
 
 
-def get_readme_description(ensemble=False, edit_select_parent=False):
+def get_readme_description(ensemble=False):
     desc = """# Self-Improving AI
 
 This system is designed to automatically produce agents for solving downstream tasks. The system iteratively improves the generated agents through code editing. To enable continuous improvement, the system should look at its code repository and the provided path to previously generated agents and their evaluation results, and then edit and enhance its own mechanisms for generating agents. This process creates a recursive loop of self-improvement.
@@ -394,14 +392,6 @@ This system is designed to automatically produce agents for solving downstream t
         desc += """\n## Optimize the Ensemble of Agents
 
 Given a fixed archive of agents, optimize the performance of the ensemble without modifying the individual agents. The archive of agents is provided in `/tmp/agent_archive/`. You can edit and improve the ensemble logic in `ensemble.py`."""
-
-    if edit_select_parent:
-        desc += """\n## Parent Selection Mechanism
-
-The parent selection mechanism should sample agents from the archive using a non-greedy, diversity-preserving strategy that allows weaker, novel, or niche agents to produce offspring. This enables the discovery of interesting stepping stones that can unlock larger future improvements. The goal is to maximize long-term innovation and avoid premature convergence, while still filtering out uninteresting or unproductive exploration paths to use compute efficiently. You can edit and improve the select parent logic in `select_next_parent.py`.
-
-Note that:
-- A node with no children does not mean that its path has not been explored. The node's lineage depth indicates the depth of exploration."""
 
     return desc
 
@@ -523,104 +513,7 @@ def apply_diffs_container(container, patch_files, repo_name=REPO_NAME, verbose=T
     return commit_hash
 
 
-def select_parent(archive, output_dir, domains, method="best"):
-    # Get candidate scores (averaged across domains)
-    candidates = {}
-    for genid in archive:
-        # Skip non-valid parents
-        valid_parent = (
-            get_node_metadata_key(output_dir, genid, "valid_parent")
-            if not is_starting_node(genid)
-            else True
-        )
-        if not valid_parent:
-            continue
-        # Get per-domain scores
-        per_domain_scores = []
-        for dom in domains:
-            split = "val" if "val" in get_domain_splits(dom) else "train"
-            score = get_saved_score(dom, output_dir, genid, split=split, type="max")
-            per_domain_scores.append(score)
-        if per_domain_scores and all(score is not None for score in per_domain_scores):
-            candidates[genid] = sum(per_domain_scores) / len(per_domain_scores)
-
-    if not candidates:
-        # Get the first initial node as the only candidate
-        candidates[archive[0]] = 0.0
-        # raise ValueError("No evaluation results found in archive.")
-
-    # Build child counts from metadata
-    child_counts = {genid: 0 for genid in candidates}
-    for genid in archive:
-        parent = get_parent_genid(output_dir, genid)
-        if parent in child_counts:
-            child_counts[parent] += 1
-
-    # Select parent randomly
-    if method == "random":
-        return random.choice(list(candidates.keys()))
-
-    # Select the latest compiled node
-    elif method == "latest":
-        return list(candidates.keys())[-1]
-
-    # Select the best compiled node
-    elif method == "best":
-        return max(candidates, key=candidates.get)  # pyright: ignore[reportCallIssue]
-
-    # Select the best compiled node with probability proportional to score
-    elif method == "score_prop":
-        commits = list(candidates.keys())
-        scores = [candidates[commit] for commit in commits]
-        mid_point = np.mean(sorted(scores, reverse=True)[:3])
-        scores = [1 / (1 + math.exp(-10 * (score - mid_point))) for score in scores]
-        total = sum(scores)
-        probabilities = (
-            [s / total for s in scores]
-            if total > 0
-            else [1 / len(scores)] * len(scores)
-        )
-        return random.choices(commits, weights=probabilities)[0]
-
-    # Select the best compiled node with probability proportional to score and inversely proportional to number of children
-    elif method == "score_child_prop":
-        commits = list(candidates.keys())
-        scores = [candidates[commit] for commit in commits]
-        mid_point = np.mean(sorted(scores, reverse=True)[:3])
-        scores = [1 / (1 + math.exp(-10 * (score - mid_point))) for score in scores]
-        penalties = [math.exp(-(child_counts[commit]/8)**3) for commit in commits]
-        combined = [s * p for s, p in zip(scores, penalties)]
-        total = sum(combined)
-        probabilities = (
-            [c / total for c in combined]
-            if total > 0
-            else [1 / len(combined)] * len(combined)
-        )
-        return random.choices(commits, weights=probabilities)[0]
-
-    else:
-        raise ValueError(f"Unknown method '{method}'")
-
-def get_latest_can_select_parent(archive, output_dir, trunc_genid=None):
-    # Truncate archive
-    if trunc_genid is not None:
-        if is_starting_node(trunc_genid):
-            return None
-        archive = [genid for genid in archive if is_starting_node(genid) or genid < trunc_genid]
-
-    # Get latest can_select_parent
-    for genid in archive[::-1]:
-        if is_starting_node(genid):
-            return genid
-        can_select_next_parent = get_node_metadata_key(output_dir, genid, "can_select_next_parent")
-        if can_select_next_parent:
-            return genid
-
-    # Shouldn't reach here
-    print("shouldn't reach here")
-    return None
-
-def run_commands_to_check_compilation(container, run_baseline=None, edit_select_parent=False):
+def run_commands_to_check_compilation(container, run_baseline=None):
     # Run commands to check if the agents are compilable
     if run_baseline and "dgm" in run_baseline:
         command = [
@@ -659,16 +552,3 @@ def run_commands_to_check_compilation(container, run_baseline=None, edit_select_
     log_container_output(exec_result)
     if exec_result.exit_code != 0:
         raise Exception("task_agent is not compilable")
-
-    if edit_select_parent:
-        command = [
-            "timeout",
-            "300",  # 5m timeout
-            "python",
-            "-c",
-            "from select_next_parent import select_next_parent",
-        ]
-        exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
-        log_container_output(exec_result)
-        if exec_result.exit_code != 0:
-            raise Exception("select_next_parent is not compilable")
