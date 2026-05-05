@@ -43,6 +43,16 @@ def test_binary_outcomes_from_polyglot_submitted_shape():
     ) == [1, 0, 0]
 
 
+def test_binary_outcomes_from_polyglot_total_instances_shape():
+    assert binary_outcomes_from_report(
+        {
+            "total_resolved_instances": 1,
+            "total_submitted_instances": 2,
+            "total_instances": 4,
+        }
+    ) == [1, 0, 0, 0]
+
+
 def test_binary_outcomes_from_polyglot_per_run_shape():
     assert binary_outcomes_from_report(
         {
@@ -72,3 +82,11 @@ def test_get_binary_outcomes_reads_existing_eval_report(tmp_path: Path):
 
     assert get_binary_outcomes("paper_review", str(tmp_path), 7, split="val") == [1, 0]
     assert get_binary_outcomes("paper_review", str(tmp_path), 8, split="val") is None
+
+
+def test_get_binary_outcomes_returns_none_for_malformed_report(tmp_path: Path):
+    path = tmp_path / "gen_7" / "paper_review_eval_val" / "report.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{", encoding="utf-8")
+
+    assert get_binary_outcomes("paper_review", str(tmp_path), 7, split="val") is None

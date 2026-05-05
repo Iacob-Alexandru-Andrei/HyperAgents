@@ -99,9 +99,12 @@ def get_binary_outcomes(domain, output_dir, genid, split="train"):
     eval_file = os.path.join(output_dir, f"gen_{genid}/{eval_dirname}/report.json")
     if not os.path.exists(eval_file):
         return None
-    with open(eval_file, "r") as f:
-        report = json.load(f)
-    return binary_outcomes_from_report(report)
+    try:
+        with open(eval_file, "r", encoding="utf-8") as f:
+            report = json.load(f)
+        return binary_outcomes_from_report(report)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
 
 
 def binary_outcomes_from_report(report):
@@ -114,6 +117,11 @@ def binary_outcomes_from_report(report):
     total = report.get("total")
     if total_correct is not None and total is not None:
         return _binary_outcomes_from_counts(total_correct, total)
+
+    total_resolved = report.get("total_resolved_instances")
+    total_instances = report.get("total_instances")
+    if total_resolved is not None and total_instances is not None:
+        return _binary_outcomes_from_counts(total_resolved, total_instances)
 
     resolved = report.get("total_resolved_instances", report.get("resolved_instances"))
     submitted = report.get("total_submitted_instances", report.get("submitted_instances"))
