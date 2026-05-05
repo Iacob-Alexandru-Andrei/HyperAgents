@@ -159,6 +159,7 @@ def copy_prev_eval_to_container(
     prev_eval_path,
     container_output_folder,
     current_genid=None,
+    parent_genid=None,
     container_folder_name=None,
 ):
     """Copy the entire prev_eval_path into the container, then remove unwanted files/dirs in the container"""
@@ -178,8 +179,14 @@ def copy_prev_eval_to_container(
         container, source_path=prev_eval_path, dest_path=container_prev_eval_path
     )
 
+    lineage_gen_dirs = _lineage_gen_dirs(prev_eval_path, parent_genid)
+    non_lineage_prune_cmds = _non_lineage_prune_cmds(
+        prev_eval_path, container_prev_eval_path, lineage_gen_dirs
+    )
+
     # Now prune inside the container
     prune_cmds = [
+        *non_lineage_prune_cmds,
         # Remove current genid folder
         f"find '{container_prev_eval_path}' -type d -name 'gen_{current_genid}' -prune -exec rm -rf {{}} +",
         # 1) Remove val/test eval directories
@@ -216,6 +223,45 @@ def copy_prev_eval_to_container(
         container_prev_eval_path = new_container_prev_eval_path
 
     return container_prev_eval_path
+
+
+def _lineage_gen_dirs(output_dir, parent_genid):
+    if parent_genid is None:
+        return set()
+
+    lineage_gen_dirs = set()
+    seen = set()
+    genid = parent_genid
+    while genid is not None and genid not in seen:
+        seen.add(genid)
+        lineage_gen_dirs.add(f"gen_{genid}")
+        genid = _read_parent_genid(output_dir, genid)
+
+    return lineage_gen_dirs
+
+
+def _non_lineage_prune_cmds(prev_eval_path, container_prev_eval_path, lineage_gen_dirs):
+    non_lineage_prune_cmds = []
+    if not lineage_gen_dirs:
+        return non_lineage_prune_cmds
+    for name in os.listdir(prev_eval_path):
+        if name not in lineage_gen_dirs:
+            non_lineage_prune_cmds.append(
+                f"find '{container_prev_eval_path}' -mindepth 1 -maxdepth 1 -name '{name}' -exec rm -rf {{}} +"
+            )
+    return non_lineage_prune_cmds
+
+
+def _read_parent_genid(output_dir, genid):
+    metadata_file = os.path.join(output_dir, f"gen_{genid}", "metadata.json")
+    if not os.path.exists(metadata_file):
+        return None
+    with open(metadata_file, "r") as f:
+        metadata = json.load(f)
+    parent_genid = metadata.get("parent_genid")
+    if parent_genid == -1 or parent_genid == "-1":
+        return None
+    return parent_genid
 
 
 def run_generation_step(
@@ -284,7 +330,7 @@ def run_generation_step(
         if run_meta_agent:
             # Copy previous generations to container
             container_prev_eval_path = copy_prev_eval_to_container(
-                container, output_dir, container_output_folder, current_genid=current_genid,
+                container, output_dir, container_output_folder, current_genid=current_genid, parent_genid=parent_genid,
             )
 
             # Run meta agent
