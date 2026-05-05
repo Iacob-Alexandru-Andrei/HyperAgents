@@ -182,7 +182,7 @@ def copy_prev_eval_to_container(
 
     lineage_gen_dirs = _lineage_gen_dirs(prev_eval_path, parent_genid)
     non_lineage_prune_cmds = _non_lineage_prune_cmds(
-        prev_eval_path, container_prev_eval_path, lineage_gen_dirs
+        container_prev_eval_path, lineage_gen_dirs
     )
 
     # Now prune inside the container
@@ -241,7 +241,7 @@ def _lineage_gen_dirs(output_dir, parent_genid):
     return lineage_gen_dirs
 
 
-def _non_lineage_prune_cmds(prev_eval_path, container_prev_eval_path, lineage_gen_dirs):
+def _non_lineage_prune_cmds(container_prev_eval_path, lineage_gen_dirs):
     if not lineage_gen_dirs:
         return []
     exclude_args = " ".join(f"! -name {shlex.quote(name)}" for name in lineage_gen_dirs)
