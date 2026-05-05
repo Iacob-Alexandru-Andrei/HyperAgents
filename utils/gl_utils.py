@@ -94,6 +94,43 @@ def get_score(domain, output_dir, genid, split="train"):
         return None  # If score is missing or file not found
 
 
+def get_binary_outcomes(domain, output_dir, genid, split="train"):
+    eval_dirname = f"{domain}_eval" if split == "train" else f"{domain}_eval_{split}"
+    eval_file = os.path.join(output_dir, f"gen_{genid}/{eval_dirname}/report.json")
+    if not os.path.exists(eval_file):
+        return None
+    with open(eval_file, "r") as f:
+        report = json.load(f)
+    return binary_outcomes_from_report(report)
+
+
+def binary_outcomes_from_report(report):
+    passed = report.get("question_ids_passed")
+    failed = report.get("question_ids_failed")
+    if passed is not None or failed is not None:
+        return [1] * len(passed or []) + [0] * len(failed or [])
+
+    total_correct = report.get("total_correct", report.get("correct"))
+    total = report.get("total")
+    if total_correct is not None and total is not None:
+        return _binary_outcomes_from_counts(total_correct, total)
+
+    resolved = report.get("total_resolved_instances", report.get("resolved_instances"))
+    submitted = report.get("total_submitted_instances", report.get("submitted_instances"))
+    if resolved is not None and submitted is not None:
+        return _binary_outcomes_from_counts(resolved, submitted)
+
+    return []
+
+
+def _binary_outcomes_from_counts(correct, total):
+    correct = int(correct)
+    total = int(total)
+    if correct < 0 or total < 0 or correct > total:
+        raise ValueError(f"Invalid binary outcome counts: correct={correct}, total={total}")
+    return [1] * correct + [0] * (total - correct)
+
+
 def get_saved_ensemble_score(domain, output_dir, genid, split="train"):
     # Get score from eval file for ensemble
     eval_file = os.path.join(
