@@ -279,9 +279,10 @@ def run_generation_step(
     meta_patch_files=None,
     parent_patch_files=None,
     run_meta_agent=True,
+    run_eval_after_meta_agent=True,
     eval_test=False,
     skip_staged_eval=False,
-    max_generation=None,
+    iterations_left=0,
     *,
     model,
 ):
@@ -359,7 +360,7 @@ def run_generation_step(
                 "--outdir",
                 container_agentoutput_folder,
                 "--iterations_left",
-                str(max_generation - current_genid),
+                str(max(0, iterations_left)),
                 "--model",
                 model,
             ]
@@ -381,7 +382,7 @@ def run_generation_step(
                 local_agentoutput_folder, "model_patch.diff"
             )
             metadata["curr_patch_files"].append(local_patch_file)
-            run_eval = file_exist_and_not_empty(local_patch_file)
+            run_eval = file_exist_and_not_empty(local_patch_file) and run_eval_after_meta_agent
             metadata["run_eval"] = run_eval
 
             # Run commands to check if the agents are compilable
@@ -512,12 +513,7 @@ if __name__ == "__main__":
         help="One or more domains to evaluate (must be from the allowed list)",
     )
     parser.add_argument("--model", type=str, required=True, help="Model to use")
-    parser.add_argument(
-        "--max_generation",
-        type=int,
-        default=10,
-        help="Maximum number of evolution generations",
-    )
+    parser.add_argument("--iterations_left", type=int, default=0)
     parser.add_argument(
         "--eval_samples",
         type=int,
@@ -606,6 +602,7 @@ if __name__ == "__main__":
         help="Skip staged evaluation",
     )
     parser.add_argument("--skip_meta_agent", default=False, action="store_true")
+    parser.add_argument("--skip_eval_after_meta_agent", default=False, action="store_true")
     args = parser.parse_args()
 
     # Post-parse validation
@@ -654,7 +651,7 @@ if __name__ == "__main__":
         domains=args.domains,
         model=args.model,
         run_id=run_id,
-        max_generation=args.max_generation,
+        iterations_left=args.iterations_left,
         output_dir=args.output_dir,
         current_genid=current_genid,
         parent_genid=parent_genid,
@@ -666,6 +663,7 @@ if __name__ == "__main__":
         meta_patch_files=meta_patch_files,
         parent_patch_files=args.parent_patch_files,
         run_meta_agent=not args.skip_meta_agent,
+        run_eval_after_meta_agent=not args.skip_eval_after_meta_agent,
         eval_test=args.eval_test,
         skip_staged_eval=args.skip_staged_eval,
     )
