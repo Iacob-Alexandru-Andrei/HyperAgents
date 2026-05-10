@@ -253,8 +253,27 @@ def build_container(
         else:
             safe_log("GPU not requested. Running without GPU.", verbose=verbose)
 
-        # Run the container with host networking and volume mount
-        # For Podman, we need to pass GPU devices explicitly via security_opt or devices
+        # Run the container with host networking and volume mount.
+        # For Podman, we need to pass GPU devices explicitly via security_opt or devices.
+        #
+        # F2c+F2h+F2g+Tier3 environment propagation. ``OPENAI_API_KEY`` is
+        # the conventional secret-flow inheritance pattern (matches every
+        # other Docker-running process in the codebase). The four
+        # ``RS_*`` variables close the live cost-tracking gap: the host
+        # process sets them via the ``proxy_lifecycle_context`` /
+        # ``proxy_host_ip_env`` context managers immediately before the
+        # container build, and the in-container ``llm_withtools.py:_budget_line``
+        # reads them on each meta-agent turn. Empty-string default keeps
+        # the no-proxy path a transparent no-op (F2h skips the budget
+        # line entirely on empty-string read).
+        cost_proxy_env = {
+            key: os.environ.get(key, "")
+            for key in (
+                "RS_COST_PROXY_HEALTH_URL",
+                "RS_EXPANSION_DEADLINE_TS",
+                "RS_COST_PROXY_BUDGET_USD",
+            )
+        }
         run_kwargs = {
             "image": image_name,
             "name": container_name,
@@ -267,6 +286,7 @@ def build_container(
             },
             "environment": {
                 "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
+                **cost_proxy_env,
             },
             "command": "tail -f /dev/null",
         }
@@ -730,21 +750,53 @@ def _apply_cost_proxy_network_lockdown(client, run_kwargs, *, verbose=True):
 
 
 def _ensure_cost_proxy_network(client, network_name, *, verbose=True):
-    """Create the custom bridge network if missing; idempotent."""
+    """Create the custom internal bridge network if missing; idempotent.
+
+    Plan-item #2 lockdown: ``internal=True`` drops the network's outbound
+    NAT so containers attached to it cannot reach the public internet
+    directly -- only the bridge gateway, where the host-bound proxy
+    listens, is reachable. The catalog rewrite still names ``proxy`` as
+    the upstream; the network-level confinement is the second layer that
+    prevents a malicious meta-agent from bypassing the proxy by editing
+    catalog model strings to point at a public IP, shelling out to
+    ``curl https://api.openai.com``, or otherwise routing around the
+    catalog. ``internal=True`` is silently honored by docker on both
+    Linux and Podman.
+    """
     try:
-        client.networks.get(network_name)
-        return
+        existing = client.networks.get(network_name)
     except docker.errors.NotFound:
-        pass
+        existing = None
     except Exception as exc:
         safe_log(
             f"Could not query docker network {network_name}: {exc}; attempting create",
             level=logging.WARNING,
             verbose=verbose,
         )
+        existing = None
+    if existing is not None:
+        # If a previous run created the network as non-internal we can't
+        # silently upgrade it (would orphan running containers). Surface
+        # the divergence and proceed; the operator can ``docker network
+        # rm <name>`` to force a clean re-create.
+        attrs = getattr(existing, "attrs", {}) or {}
+        is_internal = bool(attrs.get("Internal"))
+        if not is_internal:
+            safe_log(
+                f"Cost-proxy network {network_name} exists but is NOT internal; "
+                "containers may have egress to public internet. Recreate the "
+                "network to enforce lockdown: `docker network rm "
+                f"{network_name}` and retry.",
+                level=logging.WARNING,
+                verbose=verbose,
+            )
+        return
     try:
-        client.networks.create(network_name, driver="bridge")
-        safe_log(f"Created docker bridge network {network_name}", verbose=verbose)
+        client.networks.create(network_name, driver="bridge", internal=True)
+        safe_log(
+            f"Created docker bridge network {network_name} with internal=True (no public egress)",
+            verbose=verbose,
+        )
     except Exception as exc:
         safe_log(
             f"Failed to create docker network {network_name}: {exc}",
