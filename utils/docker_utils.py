@@ -256,6 +256,18 @@ def build_container(
             "command": "tail -f /dev/null",
         }
 
+        # F2g (recursive-scientist Tier-2 cost proxy): when the host has
+        # spawned a per-expansion ``cost_proxy`` and exported its address via
+        # ``RS_COST_PROXY_HOST_IP``, switch off host networking and confine
+        # the container to a custom bridge that resolves ``proxy`` to that
+        # IP. The container's only reachable LLM endpoint is the proxy; the
+        # default route is still up at the docker network level (we do not
+        # rely on iptables here -- the catalog rewrite is the binding
+        # control), but the proxy is the *named* endpoint the catalog
+        # points at, and the host process is the one that owns spend
+        # accounting on the wire.
+        _apply_cost_proxy_network_lockdown(client, run_kwargs, verbose=verbose)
+
         # Add GPU support
         if device_requests:
             if is_podman:
@@ -660,3 +672,68 @@ def cleanup_container(container, verbose=True):
             level=logging.ERROR,
             verbose=verbose,
         )
+
+
+# F2g: recursive-scientist Tier-2 cost-enforcing egress proxy.
+#
+# When the host process exports ``RS_COST_PROXY_HOST_IP``, this hook
+# rewrites ``run_kwargs`` to:
+#
+# 1. Drop ``network_mode="host"`` and join the container to a per-run
+#    custom bridge network. The bridge is reused across expansions of
+#    the same run so we don't churn through docker-network slots.
+# 2. Add ``extra_hosts={"proxy": <host_ip>}`` so the in-container
+#    catalog's ``@http://proxy:<port>/v1`` entries resolve to the
+#    proxy listener on the host. We use the explicit IP rather than
+#    ``host.docker.internal`` because Linux Docker historically did
+#    not enable that name; explicitly mapping it works on every
+#    runtime we support.
+#
+# Default behavior is unchanged when the env var is absent: the
+# container keeps host networking and any catalog ``@<base_url>``
+# resolves directly to the upstream provider. This is the
+# ``expansion_budget_usd=None`` path -- Tier 1 bytes-out cap is still
+# in effect, but the precise USD enforcer is opt-in.
+_DEFAULT_COST_PROXY_NETWORK = "rs-cost-proxy"
+
+
+def _apply_cost_proxy_network_lockdown(client, run_kwargs, *, verbose=True):
+    host_ip = os.environ.get("RS_COST_PROXY_HOST_IP")
+    if not host_ip:
+        return
+    network_name = os.environ.get("RS_COST_PROXY_NETWORK", _DEFAULT_COST_PROXY_NETWORK)
+    _ensure_cost_proxy_network(client, network_name, verbose=verbose)
+    run_kwargs.pop("network_mode", None)
+    run_kwargs["network"] = network_name
+    extra_hosts = dict(run_kwargs.get("extra_hosts") or {})
+    extra_hosts["proxy"] = host_ip
+    run_kwargs["extra_hosts"] = extra_hosts
+    safe_log(
+        f"Cost-proxy lockdown active: network={network_name} extra_hosts.proxy={host_ip}",
+        verbose=verbose,
+    )
+
+
+def _ensure_cost_proxy_network(client, network_name, *, verbose=True):
+    """Create the custom bridge network if missing; idempotent."""
+    try:
+        client.networks.get(network_name)
+        return
+    except docker.errors.NotFound:
+        pass
+    except Exception as exc:
+        safe_log(
+            f"Could not query docker network {network_name}: {exc}; attempting create",
+            level=logging.WARNING,
+            verbose=verbose,
+        )
+    try:
+        client.networks.create(network_name, driver="bridge")
+        safe_log(f"Created docker bridge network {network_name}", verbose=verbose)
+    except Exception as exc:
+        safe_log(
+            f"Failed to create docker network {network_name}: {exc}",
+            level=logging.ERROR,
+            verbose=verbose,
+        )
+        raise
