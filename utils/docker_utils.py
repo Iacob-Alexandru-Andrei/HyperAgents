@@ -112,13 +112,25 @@ def build_container(
     Build the Docker image with proxy and host networking, then run it interactively.
     """
     try:
-        # Set up proxy environment
-        proxy_env = {
-            "https_proxy": "http://fwdproxy:8080",
-            "http_proxy": "http://fwdproxy:8080",
-            "ftp_proxy": "http://fwdproxy:8080",
-            "http_no_proxy": ".facebook.com|.tfbnw.net|*.fb.com",
-        }
+        # F2e: env-var-driven proxy. The original initial-commit hardcoded
+        # ``http://fwdproxy:8080`` (Meta-internal); on any other host that
+        # proxy is unreachable so ``apt-get update`` inside the build returns
+        # exit 100. Honor the host's proxy env vars when set; otherwise pass
+        # nothing and let docker's host networking reach the package mirrors
+        # directly.
+        proxy_env: dict[str, str] = {}
+        for build_key, *env_keys in (
+            ("https_proxy", "https_proxy", "HTTPS_PROXY"),
+            ("http_proxy", "http_proxy", "HTTP_PROXY"),
+            ("ftp_proxy", "ftp_proxy", "FTP_PROXY"),
+        ):
+            for env_key in env_keys:
+                if os.environ.get(env_key):
+                    proxy_env[build_key] = os.environ[env_key]
+                    break
+        no_proxy = os.environ.get("no_proxy") or os.environ.get("NO_PROXY")
+        if no_proxy:
+            proxy_env["http_no_proxy"] = no_proxy
 
         # Check if we need to rebuild
         image_exists = any(
@@ -252,6 +264,9 @@ def build_container(
             "network_mode": "host",
             "volumes": {
                 os.path.abspath(repo_path): {"bind": f"/{REPO_NAME}", "mode": "rw"}
+            },
+            "environment": {
+                "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
             },
             "command": "tail -f /dev/null",
         }

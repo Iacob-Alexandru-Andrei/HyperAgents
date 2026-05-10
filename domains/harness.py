@@ -26,10 +26,17 @@ def get_dataset(domain, subset=""):
         df = pd.read_csv(f"./domains/{domain}/dataset{subset}.csv", dtype=str)
     return df
 
-def run_agent(TaskAgent, model, row, evals_folder, format_input_dict, question_id_col):
+def run_agent(TaskAgent, model, row, evals_folder, format_input_dict, question_id_col, reasoning_effort=None):
     question_id = row[question_id_col]
     chat_history_path = os.path.join(evals_folder, f"chat_history_{question_id}.md")
-    agent = TaskAgent(model=model, chat_history_file=chat_history_path)
+    # ``reasoning_effort`` is forwarded only when the TaskAgent constructor
+    # advertises it (the upstream upstream-base TaskAgent class does, but
+    # third-party patched versions in the meta-agent's diff stream may not).
+    agent_kwargs = {"model": model, "chat_history_file": chat_history_path}
+    try:
+        agent = TaskAgent(**agent_kwargs, reasoning_effort=reasoning_effort)
+    except TypeError:
+        agent = TaskAgent(**agent_kwargs)
     inputs = format_input_dict(row)
     prediction, _ = agent.forward(inputs)
     return prediction
@@ -72,6 +79,7 @@ def harness(
     resume_from=None,
     subset="",
     proofs_dname=None,
+    reasoning_effort=None,
 ):
     # Dynamically import functions based on the domain
     utils_prefix = domain.split("_", 1)[1] + "_" if domain.startswith("imo_") else ""
@@ -142,6 +150,7 @@ def harness(
                         run_agent,
                         TaskAgent, model, row, evals_folder,
                         format_input_dict, question_id_col,
+                        reasoning_effort,
                     ),
                 )
             )
@@ -221,6 +230,13 @@ if __name__ == "__main__":
         "--proofs_dname", type=str, default="", help="Path to the directory containing proofs to grade (for imo_proof_grading)"
     )
     parser.add_argument("--model", type=str, required=True, help="Model to use")
+    parser.add_argument(
+        "--reasoning_effort",
+        type=str,
+        default=None,
+        choices=["low", "medium", "high"],
+        help="OpenAI-style reasoning_effort forwarded into the TaskAgent",
+    )
     args = parser.parse_args()
 
     domain = args.domain
@@ -247,6 +263,7 @@ if __name__ == "__main__":
             resume_from=args.resume_from,
             subset=args.subset,
             proofs_dname=args.proofs_dname,
+            reasoning_effort=args.reasoning_effort,
         )
 
     # Balrog game domains

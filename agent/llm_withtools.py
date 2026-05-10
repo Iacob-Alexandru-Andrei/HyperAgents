@@ -131,19 +131,32 @@ def check_for_tool_uses(response):
     """
     Checks if the response contains one or more tool calls in json code blocks.
     Returns a list of tool use dictionaries.
-    """
-    pattern = r'<json>\s*(\{.*?\})\s*</json>'
-    matches = re.findall(pattern, response, re.DOTALL)
-    tool_uses = []
 
-    for match in matches:
+    F-class: balanced-brace scan instead of strict ``<json>...</json>`` regex.
+    Some models (e.g. Nemotron) emit ``</script>`` (or other tag mismatches)
+    as the closing token, which breaks the original regex and silently
+    returns no tool uses -- making every meta-agent expansion a no-op. The
+    scanner here only requires the ``<json>`` opening hint and then a
+    syntactically balanced JSON object; the closing tag is ignored.
+    """
+    tool_uses = []
+    pos = 0
+    decoder = json.JSONDecoder()
+    while True:
+        start = response.find('<json>', pos)
+        if start == -1:
+            break
+        brace = response.find('{', start + len('<json>'))
+        if brace == -1:
+            break
         try:
-            tool_use = json.loads(match)
-            if 'tool_name' not in tool_use or 'tool_input' not in tool_use:
-                continue  # Skip invalid tool use
-            tool_uses.append(tool_use)
+            obj, end = decoder.raw_decode(response, idx=brace)
         except json.JSONDecodeError:
-            continue  # Skip malformed JSON blocks
+            pos = brace + 1
+            continue
+        if isinstance(obj, dict) and 'tool_name' in obj and 'tool_input' in obj:
+            tool_uses.append(obj)
+        pos = end
 
     return tool_uses if tool_uses else None
 
@@ -164,6 +177,8 @@ def chat_with_agent(
     tools_available=[],  # Empty list means no tools, 'all' means all tools
     multiple_tool_calls=False,  # Whether to allow multiple tool calls in a single response
     max_tool_calls=40,  # Maximum number of tool calls allowed in a single response, -1 for unlimited
+    reasoning_effort=None,
+    catalog=None,  # F-class: model_catalog injected into tools that declare it (query_model).
 ):
     get_response_fn = get_response_from_llm
     # Construct message
@@ -173,7 +188,7 @@ def chat_with_agent(
 
     try:
         # Load all tools
-        all_tools = load_tools(logging=logging, names=tools_available)
+        all_tools = load_tools(logging=logging, names=tools_available, catalog=catalog)
         tools_dict = {tool['info']['name']: tool for tool in all_tools}
         system_msg = f"{get_tooluse_prompt([tool['info'] for tool in all_tools])}\n\n"
         num_tool_calls = 0
@@ -187,6 +202,7 @@ def chat_with_agent(
             msg=_budget_line() + system_msg + msg,
             model=model,
             msg_history=new_msg_history,
+            reasoning_effort=reasoning_effort,
         )
         logging(f"Output: {repr(response)}")
         # logging(f"Info: {repr(info)}")
@@ -231,6 +247,7 @@ def chat_with_agent(
                 msg=_budget_line() + system_msg + '\n\n'.join(tool_msgs),
                 model=model,
                 msg_history=new_msg_history,
+                reasoning_effort=reasoning_effort,
             )
             logging(f"Output: {repr(response)}")
             # logging(f"Info: {repr(info)}")
