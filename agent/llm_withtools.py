@@ -1,8 +1,76 @@
-import re
 import json
+import os
+import re
+import time
+import urllib.error
+import urllib.request
 
 from agent.llm import get_response_from_llm
 from agent.tools import load_tools
+
+# F2h (recursive-scientist Tier 3 per-turn cost visibility): when the
+# host has spawned a per-expansion cost-proxy and a wall-clock cap, two
+# env vars surface the live source and the deadline so the meta-agent
+# can self-regulate before the proxy's 402 hard-cap fires:
+#
+#   RS_COST_PROXY_HEALTH_URL  HTTP GET that returns
+#                             {"calls", "cumulative_cost_usd",
+#                              "budget_usd", ...}.
+#   RS_EXPANSION_DEADLINE_TS  Unix timestamp at which the in-container
+#                             wall-clock kill fires.
+#
+# Either env var absent => the corresponding fragment is omitted; both
+# absent => the prefix is empty and behavior matches the pre-Tier-3
+# default. The HTTP probe is wrapped in a tight timeout so a stalled
+# proxy does not deadlock the meta-agent.
+_HEALTH_URL_ENV = "RS_COST_PROXY_HEALTH_URL"
+_DEADLINE_ENV = "RS_EXPANSION_DEADLINE_TS"
+_HEALTH_PROBE_TIMEOUT_SEC = 1.0
+
+
+def _budget_line():
+    """Return the per-turn budget prefix or an empty string.
+
+    Format::
+
+        Remaining budget: $X (of $Y). Remaining wall-clock: T seconds (of B).
+        Catalog cost-per-1M-tokens for each model is in MODEL_CATALOG.md.
+
+    Either fragment is dropped when its env var is unset; if both are
+    unset the line itself is omitted (empty string), keeping pre-Tier-3
+    behavior identical.
+    """
+    health_url = os.environ.get(_HEALTH_URL_ENV)
+    deadline_ts = os.environ.get(_DEADLINE_ENV)
+    parts = []
+    if health_url:
+        try:
+            with urllib.request.urlopen(health_url, timeout=_HEALTH_PROBE_TIMEOUT_SEC) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            cap = payload.get("budget_usd")
+            cum = payload.get("cumulative_cost_usd")
+            if cap is not None and cum is not None:
+                remaining = max(0.0, float(cap) - float(cum))
+                parts.append(
+                    f"Remaining budget: ${remaining:.2f} (of ${float(cap):.2f})."
+                )
+    if deadline_ts:
+        try:
+            deadline = float(deadline_ts)
+            now = time.time()
+            remaining_sec = int(max(0.0, deadline - now))
+            parts.append(f"Remaining wall-clock: {remaining_sec} seconds.")
+        except ValueError:
+            pass
+    if not parts:
+        return ""
+    return (
+        " ".join(parts)
+        + " Catalog cost-per-1M-tokens for each model is in MODEL_CATALOG.md.\n\n"
+    )
 
 def get_tooluse_prompt(tool_infos=[]):
     """
@@ -111,9 +179,12 @@ def chat_with_agent(
         num_tool_calls = 0
 
         # Call API
+        # F2h: prepend the per-turn budget line freshly each turn so the
+        # meta-agent always sees the LIVE remaining budget (the proxy's
+        # in-memory accumulator) and the LIVE remaining wall-clock.
         logging(f"Input: {repr(msg)}")
         response, new_msg_history, info = get_response_fn(
-            msg=system_msg + msg,
+            msg=_budget_line() + system_msg + msg,
             model=model,
             msg_history=new_msg_history,
         )
@@ -155,8 +226,9 @@ def chat_with_agent(
                 tool_msgs.append("Error: Output context exceeded. Please try again.")
 
             # Get tool response
+            # F2h: prepend the per-turn budget line freshly each turn.
             response, new_msg_history, info = get_response_fn(
-                msg=system_msg + '\n\n'.join(tool_msgs),
+                msg=_budget_line() + system_msg + '\n\n'.join(tool_msgs),
                 model=model,
                 msg_history=new_msg_history,
             )
