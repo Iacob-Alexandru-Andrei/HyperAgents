@@ -99,9 +99,17 @@ def eval_produced_agent(
     eval_subset="_filtered_100_train",
     eval_test=False,
     reasoning_effort=None,
+    splits=None,
 ):
-    # Evaluate the produced agent
-    splits = get_domain_splits(domain, eval_test=eval_test)
+    # F2c (recursive-scientist deviation): when ``splits`` is supplied
+    # (a non-None list[str]), iterate over exactly those splits instead
+    # of consulting the process-global ``get_domain_splits``. The host
+    # extension layer drives the train/val/test split selection through
+    # this real parameter so concurrent ``run_generation_step`` calls
+    # with different splits never race on a global lookup. Default
+    # behaviour (``splits=None``) is unchanged.
+    if splits is None:
+        splits = get_domain_splits(domain, eval_test=eval_test)
     for split in splits:  # pyright: ignore
         safe_log(f"Evaluating the produced agent on {domain} {eval_samples} {split}...")
         eval_run_id = f"{domain}_eval" if split == "train" else f"{domain}_eval_{split}"
@@ -293,6 +301,7 @@ def run_generation_step(
     reasoning_effort=None,
     meta_agent_reasoning_effort=None,
     task_agent_reasoning_efforts=None,
+    splits=None,
 ):
     # Per-role model routing: the legacy ``model`` keyword is the uniform
     # fallback (still required by the polyglot harness path). ``meta_agent_model``
@@ -464,6 +473,7 @@ def run_generation_step(
                     reasoning_effort=_task_agent_reasoning_efforts.get(
                         domain, reasoning_effort
                     ),
+                    splits=splits,
                 )
 
             # Small sample size evaluation for staged eval
@@ -670,6 +680,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("--skip_meta_agent", default=False, action="store_true")
     parser.add_argument("--skip_eval_after_meta_agent", default=False, action="store_true")
+    parser.add_argument(
+        "--splits",
+        type=str,
+        nargs="+",
+        default=None,
+        choices=["train", "val", "test"],
+        help="F2c: explicit splits to evaluate (overrides get_domain_splits)",
+    )
     args = parser.parse_args()
 
     # Post-parse validation
@@ -734,4 +752,5 @@ if __name__ == "__main__":
         run_eval_after_meta_agent=not args.skip_eval_after_meta_agent,
         eval_test=args.eval_test,
         skip_staged_eval=args.skip_staged_eval,
+        splits=args.splits,
     )
