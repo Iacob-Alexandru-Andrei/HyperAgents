@@ -102,8 +102,24 @@ DO NOT HALLUCINATE OR MAKE UP ANYTHING.
 
 def should_retry_tool_use(response, tool_uses=None):
     """
-    Check if the response attempts to use a tool,
-    but ran out of output context.
+    Decide whether to send a corrective retry when the chat turn
+    emitted no parseable tool call.
+
+    Returns True for two malformed-output patterns; the caller surfaces
+    a corrective error message that the model can incorporate on the
+    next turn:
+
+    1. **Output was truncated mid-tool.** Response is long (>=2000
+       chars) AND has the json / tool_name / tool_input markers in
+       the right order. The model started a tool call but ran out of
+       output context before closing the JSON.
+    2. **JSON body is malformed.** Same marker pattern as (1) but
+       length is irrelevant. Nemotron 3 Super in particular tends to
+       emit unterminated strings, missing closing braces, extra
+       ``</json>``-style closers, or wrong-quote styles. Without a
+       retry, the agent exits early after one bad call -- so an
+       expansion that should produce 30 tool calls produces 1, and
+       ``parent_agent_success`` ends up False with no model_patch.diff.
     """
     # If there are tool uses, we don't need to check for retry
     if tool_uses is not None and len(tool_uses) > 0:
@@ -114,13 +130,14 @@ def should_retry_tool_use(response, tool_uses=None):
     tool_name_pos = response.find("tool_name")
     tool_input_pos = response.find("tool_input")
 
-    # Check ordering and length condition
+    # If the response shows tool-use intent (markers present in the
+    # right order) but no tool was parsed, retry. Length is informative
+    # for the corrective message but is not a gate.
     if (
         json_pos != -1
         and tool_name_pos != -1
         and tool_input_pos != -1
         and json_pos < tool_name_pos < tool_input_pos
-        and len(response) >= 2000
     ):
         return True
 
@@ -238,8 +255,26 @@ def chat_with_agent(
 
             # Check for retry
             if retry_tool_use:
-                logging("Error: Output context exceeded. Please try again.")
-                tool_msgs.append("Error: Output context exceeded. Please try again.")
+                # Distinguish "ran out of output context" from "JSON
+                # body was malformed" so the model can correct
+                # appropriately on the next turn. Both produce the same
+                # observable shape (markers present, no tool parsed),
+                # so we hint at both possibilities and quote the
+                # common Nemotron 3 Super failure modes.
+                err_msg = (
+                    "Error: your previous response contained a tool-call "
+                    "intent (``<json>`` markers + ``tool_name`` + ``tool_input``) "
+                    "but no parseable tool was extracted. Common causes: "
+                    "(1) the JSON body had an unterminated string (missing "
+                    "closing quote), (2) a missing closing brace ``}``, "
+                    "(3) extra ``</json>`` closing tags, (4) the response "
+                    "was truncated mid-output. Re-emit ONE complete tool call "
+                    "in the exact format ``<json>{\"tool_name\": ..., "
+                    "\"tool_input\": ...}</json>`` with valid JSON and no "
+                    "trailing tags."
+                )
+                logging(err_msg)
+                tool_msgs.append(err_msg)
 
             # Get tool response
             # F2h: prepend the per-turn budget line freshly each turn.
