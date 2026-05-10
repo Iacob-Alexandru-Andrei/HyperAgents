@@ -11,6 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     patch \
     && rm -rf /var/lib/apt/lists/*
 
+# F2f: trust all directories for git inside this sandbox image. The
+# /hyperagents and /REPO_NAME bind-mounts come from the host with the host
+# user's UID, while the container process runs as root; without this,
+# git rejects every operation with "dubious ownership".
+RUN git config --global --add safe.directory '*'
+
 WORKDIR /hyperagents
 
 COPY requirements-core.txt .

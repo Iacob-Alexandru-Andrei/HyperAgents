@@ -3,6 +3,10 @@ from agent.llm_withtools import chat_with_agent
 from utils.common import extract_jsons
 
 class TaskAgent(AgentSystem):
+    def __init__(self, model, chat_history_file='./outputs/chat_history.md', reasoning_effort=None):
+        super().__init__(model=model, chat_history_file=chat_history_file)
+        self.reasoning_effort = reasoning_effort
+
     def forward(self, inputs):
         """
         An agent that solves a given task.
@@ -16,6 +20,7 @@ class TaskAgent(AgentSystem):
                 - new_msg_history (list): A list of messages representing the message history of the interaction.
         """
         domain = inputs['domain']
+        output_format, extract_field = self.OUTPUT_FORMATS.get(domain, ('Respond in JSON format with the following schema:\n<json>\n{\n    "response": ...\n}\n</json>', "response"))
         instruction = f"""You are an agent.
 
 Task input:
@@ -23,22 +28,48 @@ Task input:
 {inputs}
 ```
 
-Respond in JSON format with the following schema:
-<json>
-{{
-    "response": ...
-}}
-</json>"""
-        new_msg_history = chat_with_agent(instruction, model=self.model, msg_history=[], logging=self.log)
+{output_format}"""
+        new_msg_history = chat_with_agent(
+            instruction,
+            model=self.model,
+            msg_history=[],
+            logging=self.log,
+            reasoning_effort=self.reasoning_effort,
+        )
 
         # Extract the response
         prediction = "None"
         try:
             extracted_jsons = extract_jsons(new_msg_history[-1]['text'])
-            if extracted_jsons is not None and "response" in extracted_jsons[-1]:
-                prediction = extracted_jsons[-1]['response']
+            if extracted_jsons is not None and extract_field in extracted_jsons[-1]:
+                prediction = extracted_jsons[-1][extract_field]
         except Exception as e:
             self.log(f"Error extracting prediction: {e}")
             prediction = "None"
 
         return prediction, new_msg_history
+
+
+# Per-domain output-format dispatch. Anything not listed here falls through
+# to the default in ``TaskAgent.forward`` (response-shaped JSON).
+TaskAgent.OUTPUT_FORMATS = {
+    "paper_review": (
+        'You are reviewing the paper above for a top ML venue. Read it carefully and decide '
+        'whether to Accept or Reject it.\n\n'
+        'Respond with one JSON block:\n'
+        '{\n'
+        '  "Summary": "...", "Strengths": [...], "Weaknesses": [...],\n'
+        '  "Decision": "Accept" | "Reject"\n'
+        '}\n'
+        'For "Decision", use only "Accept" or "Reject".',
+        "Decision",
+    ),
+    "paper_writer_review": (
+        'Continue the paper above.\n\n'
+        'Respond with one JSON block:\n'
+        '{\n'
+        '  "response": "..."\n'
+        '}',
+        "response",
+    ),
+}

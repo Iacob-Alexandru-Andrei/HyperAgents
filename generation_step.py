@@ -98,6 +98,7 @@ def eval_produced_agent(
     eval_workers=10,
     eval_subset="_filtered_100_train",
     eval_test=False,
+    reasoning_effort=None,
 ):
     # Evaluate the produced agent
     splits = get_domain_splits(domain, eval_test=eval_test)
@@ -128,6 +129,8 @@ def eval_produced_agent(
             "--model",
             model,
         ]
+        if reasoning_effort:
+            command += ["--reasoning_effort", reasoning_effort]
         exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
         log_container_output(exec_result)
         command = [
@@ -284,8 +287,38 @@ def run_generation_step(
     skip_staged_eval=False,
     iterations_left=0,
     *,
-    model,
+    model=None,
+    meta_agent_model=None,
+    task_agent_models=None,
+    reasoning_effort=None,
+    meta_agent_reasoning_effort=None,
+    task_agent_reasoning_efforts=None,
 ):
+    # Per-role model routing: the legacy ``model`` keyword is the uniform
+    # fallback (still required by the polyglot harness path). ``meta_agent_model``
+    # overrides the meta-agent invocation only; ``task_agent_models`` is a
+    # per-domain map for the task-agent eval calls. Either path falls back to
+    # ``model`` when its specific entry is missing.
+    #
+    # ``reasoning_effort`` mirrors the per-role model shape: a uniform
+    # ``reasoning_effort`` is applied to both the meta-agent and every task-
+    # agent path; ``meta_agent_reasoning_effort`` and
+    # ``task_agent_reasoning_efforts`` (per-domain map) override the uniform
+    # value for their specific call site. ``None`` means "do not pass the
+    # parameter through" -- downstream agent.llm silently drops it for models
+    # that do not document support for it.
+    if model is None and meta_agent_model is None and not task_agent_models:
+        raise TypeError(
+            "run_generation_step requires `model=`, `meta_agent_model=`, or `task_agent_models=`"
+        )
+    meta_agent_model = meta_agent_model if meta_agent_model is not None else model
+    _task_agent_models = dict(task_agent_models or {})
+    meta_agent_reasoning_effort = (
+        meta_agent_reasoning_effort
+        if meta_agent_reasoning_effort is not None
+        else reasoning_effort
+    )
+    _task_agent_reasoning_efforts = dict(task_agent_reasoning_efforts or {})
     # Setup local output folder
     prev_gen_dir = os.path.join(output_dir, f"gen_{parent_genid}")
     gen_output_dir = os.path.join(output_dir, f"gen_{current_genid}")
@@ -362,8 +395,10 @@ def run_generation_step(
                 "--iterations_left",
                 str(max(0, iterations_left)),
                 "--model",
-                model,
+                meta_agent_model,
             ]
+            if meta_agent_reasoning_effort:
+                command += ["--reasoning_effort", meta_agent_reasoning_effort]
 
             exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
             log_container_output(exec_result)
@@ -383,6 +418,21 @@ def run_generation_step(
                 source_path=container_agentoutput_folder,
                 dest_path=local_agentoutput_folder,
             )
+
+            # F-class: pull the updated llm_calls.jsonl back to the host so
+            # the host's rebuild_cost_md can re-render cost.md from the
+            # merged log. Best-effort -- the meta-agent may not have made
+            # any LLM calls if it errored early.
+            container_jsonl = os.path.join(
+                container_prev_eval_path, "llm_calls.jsonl"
+            )
+            host_jsonl = os.path.join(output_dir, "llm_calls.jsonl")
+            try:
+                copy_from_container(
+                    container, source_path=container_jsonl, dest_path=host_jsonl
+                )
+            except Exception as exc:
+                safe_log(f"warn: could not extract llm_calls.jsonl: {exc}")
 
             # Check if agent produced a diff
             local_patch_file = os.path.join(
@@ -410,7 +460,10 @@ def run_generation_step(
                     eval_workers=eval_workers,
                     eval_subset=eval_subset,
                     eval_test=eval_test,
-                    model=model,
+                    model=_task_agent_models.get(domain, model),
+                    reasoning_effort=_task_agent_reasoning_efforts.get(
+                        domain, reasoning_effort
+                    ),
                 )
 
             # Small sample size evaluation for staged eval
@@ -520,6 +573,13 @@ if __name__ == "__main__":
         help="One or more domains to evaluate (must be from the allowed list)",
     )
     parser.add_argument("--model", type=str, required=True, help="Model to use")
+    parser.add_argument(
+        "--reasoning_effort",
+        type=str,
+        default=None,
+        choices=["low", "medium", "high"],
+        help="OpenAI-style reasoning_effort applied to meta + task agent calls",
+    )
     parser.add_argument("--iterations_left", type=int, default=0)
     parser.add_argument(
         "--eval_samples",
@@ -657,6 +717,7 @@ if __name__ == "__main__":
         docker.from_env(),
         domains=args.domains,
         model=args.model,
+        reasoning_effort=args.reasoning_effort,
         run_id=run_id,
         iterations_left=args.iterations_left,
         output_dir=args.output_dir,
