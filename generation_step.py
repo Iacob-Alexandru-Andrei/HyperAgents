@@ -368,6 +368,13 @@ def run_generation_step(
             exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
             log_container_output(exec_result)
             metadata["parent_agent_success"] = exec_result.exit_code == 0
+            # F2i (recursive-scientist Tier 3 two-axis kill): persist the
+            # exit code so the host can distinguish a wall-clock kill
+            # (the in-container ``timeout 21600`` shell wrapper exits 124)
+            # from a clean-exit ``parent_agent_success=False`` (e.g. the
+            # meta-agent gave up on its own). The host writes
+            # ``killed_by="time"`` when this is 124.
+            metadata["meta_agent_exit_code"] = int(exec_result.exit_code or 0)
 
             # Copy container outputs to local
             local_agentoutput_folder = os.path.join(gen_output_dir, "agent_output/")
