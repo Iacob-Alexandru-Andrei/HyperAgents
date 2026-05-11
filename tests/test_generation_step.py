@@ -14,6 +14,8 @@ class _ExecResult:
 class _FakeContainer:
     def __init__(self) -> None:
         self.commands: list[list[str]] = []
+        self.build_args = ()
+        self.build_kwargs: dict[str, object] = {}
 
     def start(self) -> None:
         pass
@@ -31,7 +33,12 @@ def _install_generation_fakes(
     container = _FakeContainer()
     eval_calls: list[str] = []
 
-    monkeypatch.setattr(generation_step, "build_container", lambda *args, **kwargs: container)
+    def fake_build_container(*args, **kwargs):
+        container.build_args = args
+        container.build_kwargs = kwargs
+        return container
+
+    monkeypatch.setattr(generation_step, "build_container", fake_build_container)
     monkeypatch.setattr(generation_step, "cleanup_container", lambda container: None)
     monkeypatch.setattr(generation_step, "setup_logger", lambda path: None)
     monkeypatch.setattr(generation_step, "safe_log", lambda *args, **kwargs: None)
@@ -95,6 +102,44 @@ def test_generation_step_forwards_clamped_iterations_left(
 
     command = _meta_agent_command(container)
     assert command[command.index("--iterations_left") + 1] == expected
+
+
+def test_generation_step_mounts_budget_status_and_passes_container_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    status_path = tmp_path / "gen_1" / "budget" / "status.md"
+    status_path.parent.mkdir(parents=True)
+    status_path.write_text("remaining: 3\n", encoding="utf-8")
+    container, _ = _install_generation_fakes(
+        monkeypatch,
+        "diff --git a/task_agent.py b/task_agent.py\n",
+    )
+
+    generation_step.run_generation_step(
+        docker_client=object(),
+        domains=["paper_review"],
+        output_dir=str(tmp_path),
+        run_id="unit",
+        current_genid=1,
+        parent_genid="initial",
+        root_dir=str(tmp_path / "root"),
+        root_commit="root",
+        eval_samples=[1],
+        eval_workers=1,
+        eval_subsets=[""],
+        parent_patch_files=[],
+        run_eval_after_meta_agent=False,
+        skip_staged_eval=True,
+        iterations_left=1,
+        model="fake",
+        budget_status_path=str(status_path),
+    )
+
+    assert container.build_kwargs["budget_status_path"] == str(status_path)
+    command = _meta_agent_command(container)
+    assert command[command.index("--budget_status_path") + 1] == "/rqgm_budget/status.md"
+    assert str(status_path) not in command
 
 
 def test_generation_step_can_skip_eval_after_meta_agent(

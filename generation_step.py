@@ -37,6 +37,18 @@ from utils.gl_utils import (
     process_meta_patch_files,
 )
 
+BUDGET_STATUS_CONTAINER_DIR = "/rqgm_budget"
+
+
+def _container_budget_status_path(budget_status_path):
+    if not budget_status_path:
+        return None
+    return os.path.join(
+        BUDGET_STATUS_CONTAINER_DIR,
+        os.path.basename(budget_status_path),
+    )
+
+
 def _snapshot_train_lineage_in_container(
     container,
     current_genid,
@@ -340,9 +352,11 @@ def run_generation_step(
         domains=domains,
         cost_proxy_enabled=cost_proxy_enabled,
         cost_proxy_network=cost_proxy_network,
+        budget_status_path=budget_status_path,
     )
     container.start()
     container_output_folder = "/tmp/"
+    container_budget_status_path = _container_budget_status_path(budget_status_path)
 
     try:
         # Apply meta patches (only for starting node, because subsequent generations will inherit the patches from the parent)
@@ -413,8 +427,8 @@ def run_generation_step(
             ]
             if meta_agent_reasoning_effort:
                 command += ["--reasoning_effort", meta_agent_reasoning_effort]
-            if budget_status_path:
-                command += ["--budget_status_path", budget_status_path]
+            if container_budget_status_path:
+                command += ["--budget_status_path", container_budget_status_path]
 
             exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
             log_container_output(exec_result)
@@ -468,7 +482,7 @@ def run_generation_step(
                         domain, reasoning_effort
                     ),
                     splits=splits,
-                    budget_status_path=budget_status_path,
+                    budget_status_path=container_budget_status_path,
                 )
 
             # Small sample size evaluation for staged eval

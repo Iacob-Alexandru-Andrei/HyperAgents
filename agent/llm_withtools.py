@@ -5,13 +5,16 @@ from agent.llm import get_response_from_llm
 from agent.tools import load_tools
 
 def _budget_status_prefix(budget_status_path):
+    """Return the budget-status prefix to inject into the meta-agent prompt.
+
+    Returns ``""`` only when the path is unset or the file is empty. If
+    the host passes an explicit path, it must be readable from this
+    process's view; missing or unreadable paths are configuration errors.
+    """
     if not budget_status_path:
         return ""
-    try:
-        with open(budget_status_path) as f:
-            text = f.read().strip()
-    except OSError:
-        return ""
+    with open(budget_status_path) as f:
+        text = f.read().strip()
     if not text:
         return ""
     return text + "\n\n"
@@ -141,6 +144,8 @@ def chat_with_agent(
     reasoning_effort=None,
     catalog=None,  # F-class: model_catalog injected into tools that declare it (query_model).
     budget_status_path=None,
+    workspace_root=None,
+    current_gen=None,
 ):
     get_response_fn = get_response_from_llm
     # Construct message
@@ -150,7 +155,13 @@ def chat_with_agent(
 
     try:
         # Load all tools
-        all_tools = load_tools(logging=logging, names=tools_available, catalog=catalog)
+        all_tools = load_tools(
+            logging=logging,
+            names=tools_available,
+            catalog=catalog,
+            workspace_root=workspace_root,
+            current_gen=current_gen,
+        )
         tools_dict = {tool['info']['name']: tool for tool in all_tools}
         system_msg = f"{get_tooluse_prompt([tool['info'] for tool in all_tools])}\n\n"
         num_tool_calls = 0

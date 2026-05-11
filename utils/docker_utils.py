@@ -1,6 +1,7 @@
 import io
 import logging
 import os
+import subprocess
 import tarfile
 import threading
 import warnings
@@ -12,6 +13,17 @@ from docker.models.containers import Container
 from docker.types import Mount
 
 from utils.constants import REPO_NAME
+
+BUDGET_STATUS_CONTAINER_DIR = "/rqgm_budget"
+
+
+def _budget_status_volume(budget_status_path):
+    if not budget_status_path:
+        return None
+    return (
+        os.path.abspath(os.path.dirname(budget_status_path) or "."),
+        BUDGET_STATUS_CONTAINER_DIR,
+    )
 
 warnings.filterwarnings(
     "ignore",
@@ -109,6 +121,7 @@ def build_container(
     verbose=True,
     cost_proxy_enabled=None,
     cost_proxy_network=None,
+    budget_status_path=None,
 ):
     """
     Build the Docker image with proxy and host networking, then run it interactively.
@@ -258,6 +271,14 @@ def build_container(
         # Run the container with host networking and volume mount.
         # For Podman, we need to pass GPU devices explicitly via security_opt or devices.
         #
+        volumes = {
+            os.path.abspath(repo_path): {"bind": f"/{REPO_NAME}", "mode": "rw"}
+        }
+        budget_status_volume = _budget_status_volume(budget_status_path)
+        if budget_status_volume is not None:
+            host_dir, container_dir = budget_status_volume
+            volumes[host_dir] = {"bind": container_dir, "mode": "ro"}
+
         run_kwargs = {
             "image": image_name,
             "name": container_name,
@@ -265,9 +286,7 @@ def build_container(
             "tty": True,
             "stdin_open": True,
             "network_mode": "host",
-            "volumes": {
-                os.path.abspath(repo_path): {"bind": f"/{REPO_NAME}", "mode": "rw"}
-            },
+            "volumes": volumes,
             "environment": {
                 # F2i (recursive-scientist deviation): alias ``NVIDIA_API_KEY``
                 # to ``OPENAI_API_KEY`` here so the host's ``experiments/run.py``
@@ -305,17 +324,22 @@ def build_container(
 
                 # Build the podman run command with CDI GPU support
                 # Podman 5.x uses CDI (Container Device Interface) instead of --gpus
-                import subprocess
-
-                volume_mount = f"{os.path.abspath(repo_path)}:/{REPO_NAME}:rw"
-                cmd = [
-                    "podman",
-                    "run",
-                    "-d",  # detach
-                    "-it",  # interactive + tty
-                    "--network=host",
-                    "-v",
-                    volume_mount,
+                volume_mounts = [f"{os.path.abspath(repo_path)}:/{REPO_NAME}:rw"]
+                if budget_status_volume is not None:
+                    host_dir, container_dir = budget_status_volume
+                    volume_mounts.append(f"{host_dir}:{container_dir}:ro")
+                cmd = ["podman", "run", "-d", "-it"]
+                if "network" in run_kwargs:
+                    cmd += ["--network", str(run_kwargs["network"])]
+                else:
+                    cmd.append(f"--network={run_kwargs.get('network_mode', 'host')}")
+                for host, ip in dict(run_kwargs.get("extra_hosts") or {}).items():
+                    cmd += ["--add-host", f"{host}:{ip}"]
+                for volume_mount in volume_mounts:
+                    cmd += ["-v", volume_mount]
+                for key, value in dict(run_kwargs.get("environment") or {}).items():
+                    cmd += ["-e", f"{key}={value}"]
+                cmd += [
                     "--device",
                     "nvidia.com/gpu=all",  # CDI format for Podman 5.x
                     # Add environment variables for NVIDIA libraries

@@ -107,4 +107,5 @@ class MetaAgent(AgentSystem):
             reasoning_effort=self.reasoning_effort,
             catalog=catalog,
             budget_status_path=self.budget_status_path,
+            workspace_root=repo_path,
         )
