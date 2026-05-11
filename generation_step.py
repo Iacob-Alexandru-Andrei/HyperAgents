@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -34,6 +35,33 @@ from utils.gl_utils import (
     is_starting_node,
     process_meta_patch_files,
 )
+
+
+def _append_jsonl_file(src_path, dest_path):
+    if not os.path.exists(src_path):
+        return
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    fd = os.open(dest_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            with open(src_path, "rb") as src:
+                for line in src:
+                    if not line.strip():
+                        continue
+                    view = memoryview(line if line.endswith(b"\n") else line + b"\n")
+                    while view:
+                        written = os.write(fd, view)
+                        if written <= 0:
+                            raise OSError(f"short write while appending {dest_path}")
+                        view = view[written:]
+            os.fsync(fd)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def run_harness_polyglot(root_dir, output_dir, genid, *, model, skip_staged_eval=False, num_samples=-1):
@@ -302,6 +330,11 @@ def run_generation_step(
     meta_agent_reasoning_effort=None,
     task_agent_reasoning_efforts=None,
     splits=None,
+    cost_proxy_enabled=None,
+    cost_proxy_network=None,
+    cost_proxy_health_url=None,
+    cost_proxy_deadline_ts=None,
+    cost_proxy_budget_usd=None,
 ):
     # Per-role model routing: the legacy ``model`` keyword is the uniform
     # fallback (still required by the polyglot harness path). ``meta_agent_model``
@@ -354,6 +387,11 @@ def run_generation_step(
         image_name,
         container_name,
         domains=domains,
+        cost_proxy_enabled=cost_proxy_enabled,
+        cost_proxy_network=cost_proxy_network,
+        cost_proxy_health_url=cost_proxy_health_url,
+        cost_proxy_deadline_ts=cost_proxy_deadline_ts,
+        cost_proxy_budget_usd=cost_proxy_budget_usd,
     )
     container.start()
     container_output_folder = "/tmp/"
@@ -436,12 +474,20 @@ def run_generation_step(
                 container_prev_eval_path, "llm_calls.jsonl"
             )
             host_jsonl = os.path.join(output_dir, "llm_calls.jsonl")
+            tmp_jsonl = os.path.join(
+                gen_output_dir,
+                f"llm_calls.{os.getpid()}.{current_genid}.{uuid.uuid4().hex}.jsonl",
+            )
             try:
                 copy_from_container(
-                    container, source_path=container_jsonl, dest_path=host_jsonl
+                    container, source_path=container_jsonl, dest_path=tmp_jsonl
                 )
+                _append_jsonl_file(tmp_jsonl, host_jsonl)
             except Exception as exc:
                 safe_log(f"warn: could not extract llm_calls.jsonl: {exc}")
+            finally:
+                if os.path.exists(tmp_jsonl):
+                    os.unlink(tmp_jsonl)
 
             # Check if agent produced a diff
             local_patch_file = os.path.join(

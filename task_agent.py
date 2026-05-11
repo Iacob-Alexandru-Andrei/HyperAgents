@@ -7,6 +7,8 @@ class TaskAgent(AgentSystem):
         super().__init__(model=model, chat_history_file=chat_history_file)
         self.reasoning_effort = reasoning_effort
 
+    MAX_PARSE_RETRIES = 3
+
     def forward(self, inputs):
         """
         An agent that solves a given task.
@@ -29,23 +31,41 @@ Task input:
 ```
 
 {output_format}"""
-        new_msg_history = chat_with_agent(
-            instruction,
-            model=self.model,
-            msg_history=[],
-            logging=self.log,
-            reasoning_effort=self.reasoning_effort,
-        )
 
-        # Extract the response
+        # F2k: bounded retry on parse failure. Up to MAX_PARSE_RETRIES calls
+        # total; each retry sends a flat corrective re-prompt that restates
+        # the required format. History accumulates across attempts so the
+        # model sees its own bad output. On exhaustion, fall through to the
+        # sentinel ``"None"`` that downstream eval code already handles.
+        new_msg_history = []
+        current_instruction = instruction
         prediction = "None"
-        try:
-            extracted_jsons = extract_jsons(new_msg_history[-1]['text'])
-            if extracted_jsons is not None and extract_field in extracted_jsons[-1]:
-                prediction = extracted_jsons[-1][extract_field]
-        except Exception as e:
-            self.log(f"Error extracting prediction: {e}")
-            prediction = "None"
+        for attempt in range(self.MAX_PARSE_RETRIES):
+            new_msg_history = chat_with_agent(
+                current_instruction,
+                model=self.model,
+                msg_history=new_msg_history,
+                logging=self.log,
+                reasoning_effort=self.reasoning_effort,
+            )
+            try:
+                extracted_jsons = extract_jsons(new_msg_history[-1]['text'])
+            except Exception as e:
+                self.log(f"Error extracting prediction (attempt {attempt + 1}): {e}")
+                extracted_jsons = None
+            # Prefer the LAST JSON object that contains the expected field —
+            # for chain-of-thought replies, the final JSON is the answer.
+            if extracted_jsons:
+                for obj in reversed(extracted_jsons):
+                    if isinstance(obj, dict) and extract_field in obj:
+                        prediction = obj[extract_field]
+                        return prediction, new_msg_history
+            current_instruction = (
+                'Your previous reply did not contain a parseable JSON object '
+                f'with the required field "{extract_field}". '
+                'Reply with a single JSON object and nothing else.\n\n'
+                f'{output_format}'
+            )
 
         return prediction, new_msg_history
 
