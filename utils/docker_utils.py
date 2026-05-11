@@ -107,18 +107,35 @@ def build_container(
     force_rebuild=False,
     domains=None,
     verbose=True,
+    cost_proxy_enabled=None,
+    cost_proxy_network=None,
+    cost_proxy_health_url=None,
+    cost_proxy_deadline_ts=None,
+    cost_proxy_budget_usd=None,
 ):
     """
     Build the Docker image with proxy and host networking, then run it interactively.
     """
     try:
-        # Set up proxy environment
-        proxy_env = {
-            "https_proxy": "http://fwdproxy:8080",
-            "http_proxy": "http://fwdproxy:8080",
-            "ftp_proxy": "http://fwdproxy:8080",
-            "http_no_proxy": ".facebook.com|.tfbnw.net|*.fb.com",
-        }
+        # F2e: env-var-driven proxy. The original initial-commit hardcoded
+        # ``http://fwdproxy:8080`` (Meta-internal); on any other host that
+        # proxy is unreachable so ``apt-get update`` inside the build returns
+        # exit 100. Honor the host's proxy env vars when set; otherwise pass
+        # nothing and let docker's host networking reach the package mirrors
+        # directly.
+        proxy_env: dict[str, str] = {}
+        for build_key, *env_keys in (
+            ("https_proxy", "https_proxy", "HTTPS_PROXY"),
+            ("http_proxy", "http_proxy", "HTTP_PROXY"),
+            ("ftp_proxy", "ftp_proxy", "FTP_PROXY"),
+        ):
+            for env_key in env_keys:
+                if os.environ.get(env_key):
+                    proxy_env[build_key] = os.environ[env_key]
+                    break
+        no_proxy = os.environ.get("no_proxy") or os.environ.get("NO_PROXY")
+        if no_proxy:
+            proxy_env["http_no_proxy"] = no_proxy
 
         # Check if we need to rebuild
         image_exists = any(
@@ -241,8 +258,29 @@ def build_container(
         else:
             safe_log("GPU not requested. Running without GPU.", verbose=verbose)
 
-        # Run the container with host networking and volume mount
-        # For Podman, we need to pass GPU devices explicitly via security_opt or devices
+        # Run the container with host networking and volume mount.
+        # For Podman, we need to pass GPU devices explicitly via security_opt or devices.
+        #
+        # F2c+F2h+F2g+Tier3 environment propagation. ``OPENAI_API_KEY`` is
+        # the conventional secret-flow inheritance pattern. Recursive
+        # scientist passes cost-proxy settings explicitly so concurrent
+        # container launches do not race through process-global env; the
+        # legacy env fallback remains for direct upstream usage.
+        if cost_proxy_enabled is None:
+            cost_proxy_env = {
+                key: os.environ.get(key, "")
+                for key in (
+                    "RS_COST_PROXY_HEALTH_URL",
+                    "RS_EXPANSION_DEADLINE_TS",
+                    "RS_COST_PROXY_BUDGET_USD",
+                )
+            }
+        else:
+            cost_proxy_env = {
+                "RS_COST_PROXY_HEALTH_URL": cost_proxy_health_url or "",
+                "RS_EXPANSION_DEADLINE_TS": cost_proxy_deadline_ts or "",
+                "RS_COST_PROXY_BUDGET_USD": cost_proxy_budget_usd or "",
+            }
         run_kwargs = {
             "image": image_name,
             "name": container_name,
@@ -253,8 +291,31 @@ def build_container(
             "volumes": {
                 os.path.abspath(repo_path): {"bind": f"/{REPO_NAME}", "mode": "rw"}
             },
+            "environment": {
+                # F2i (recursive-scientist deviation): alias ``NVIDIA_API_KEY``
+                # to ``OPENAI_API_KEY`` here so the host's ``experiments/run.py``
+                # never has to write the parent process's ``os.environ``
+                # (rs.no-os-environ-anywhere absolute rule). The in-container
+                # litellm wrapper at ``hyperagents/agent/llm.py`` still reads
+                # ``OPENAI_API_KEY`` exclusively; the alias is scoped to the
+                # container's environment dict only.
+                "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY")
+                or os.environ.get("NVIDIA_API_KEY", ""),
+                **cost_proxy_env,
+            },
             "command": "tail -f /dev/null",
         }
+
+        # F2g (recursive-scientist Tier-2 cost proxy): when enabled, switch
+        # off host networking and confine the container to a custom bridge
+        # that resolves ``proxy`` to the bridge gateway.
+        _apply_cost_proxy_network_lockdown(
+            client,
+            run_kwargs,
+            enabled=cost_proxy_enabled,
+            network_name=cost_proxy_network,
+            verbose=verbose,
+        )
 
         # Add GPU support
         if device_requests:
@@ -660,3 +721,139 @@ def cleanup_container(container, verbose=True):
             level=logging.ERROR,
             verbose=verbose,
         )
+
+
+# F2g: recursive-scientist Tier-2 cost-enforcing egress proxy.
+#
+# When the cost proxy is enabled, this hook rewrites ``run_kwargs`` to:
+#
+# 1. Drop ``network_mode="host"`` and join the container to a per-run
+#    custom bridge network. The bridge is reused across expansions of
+#    the same run so we don't churn through docker-network slots.
+# 2. Add ``extra_hosts={"proxy": <host_ip>}`` so the in-container
+#    catalog's ``@http://proxy:<port>/v1`` entries resolve to the
+#    proxy listener on the host. We use the explicit IP rather than
+#    ``host.docker.internal`` because Linux Docker historically did
+#    not enable that name; explicitly mapping it works on every
+#    runtime we support.
+#
+# Default behavior is unchanged when disabled: the container keeps host
+# networking and any catalog ``@<base_url>`` resolves directly to the
+# upstream provider.
+_DEFAULT_COST_PROXY_NETWORK = "rs-cost-proxy"
+_COST_PROXY_NETWORK_LOCK = threading.Lock()
+
+
+def _apply_cost_proxy_network_lockdown(
+    client,
+    run_kwargs,
+    *,
+    enabled=None,
+    network_name=None,
+    verbose=True,
+):
+    """F2j (recursive-scientist deviation): attach container to the cost-proxy
+    internal bridge and point ``extra_hosts.proxy`` at the **bridge gateway IP**
+    (the host's interface on the bridge), NOT the host's external IP.
+
+    ``internal=True`` bridges have no route to the host's external IP — only the
+    bridge gateway (e.g. ``172.18.0.1``) is reachable from attached containers.
+    Direct callers can still enable this through the legacy
+    ``RS_COST_PROXY_HOST_IP`` sentinel; recursive-scientist passes
+    ``enabled`` explicitly to avoid process-global env races.
+    """
+    env_enabled = os.environ.get("RS_COST_PROXY_HOST_IP")
+    if enabled is None:
+        enabled = bool(env_enabled)
+    if not enabled:
+        return
+    if network_name is None:
+        network_name = os.environ.get("RS_COST_PROXY_NETWORK", _DEFAULT_COST_PROXY_NETWORK)
+    _ensure_cost_proxy_network(client, network_name, verbose=verbose)
+    # Discover the bridge gateway IP after the network exists.
+    network = client.networks.get(network_name)
+    network.reload()
+    ipam_config = (network.attrs.get("IPAM") or {}).get("Config") or []
+    gateway_ip = None
+    for cfg in ipam_config:
+        candidate = cfg.get("Gateway") if isinstance(cfg, dict) else None
+        if candidate:
+            gateway_ip = str(candidate)
+            break
+    if not gateway_ip:
+        raise RuntimeError(
+            f"Cost-proxy network {network_name} has no IPAM gateway; cannot route "
+            "internal containers to the host-side proxy. Recreate the network."
+        )
+    run_kwargs.pop("network_mode", None)
+    run_kwargs["network"] = network_name
+    extra_hosts = dict(run_kwargs.get("extra_hosts") or {})
+    extra_hosts["proxy"] = gateway_ip
+    run_kwargs["extra_hosts"] = extra_hosts
+    safe_log(
+        f"Cost-proxy lockdown active: network={network_name} "
+        f"extra_hosts.proxy={gateway_ip} (bridge gateway)",
+        verbose=verbose,
+    )
+
+
+def _ensure_cost_proxy_network(client, network_name, *, verbose=True):
+    """Create the custom internal bridge network if missing; idempotent.
+
+    Plan-item #2 lockdown: ``internal=True`` drops the network's outbound
+    NAT so containers attached to it cannot reach the public internet
+    directly -- only the bridge gateway, where the host-bound proxy
+    listens, is reachable. The catalog rewrite still names ``proxy`` as
+    the upstream; the network-level confinement is the second layer that
+    prevents a malicious meta-agent from bypassing the proxy by editing
+    catalog model strings to point at a public IP, shelling out to
+    ``curl https://api.openai.com``, or otherwise routing around the
+    catalog. ``internal=True`` is silently honored by docker on both
+    Linux and Podman.
+    """
+    with _COST_PROXY_NETWORK_LOCK:
+        try:
+            existing = client.networks.get(network_name)
+        except docker.errors.NotFound:
+            existing = None
+        except Exception as exc:
+            safe_log(
+                f"Could not query docker network {network_name}: {exc}; attempting create",
+                level=logging.WARNING,
+                verbose=verbose,
+            )
+            existing = None
+        if existing is None:
+            try:
+                client.networks.create(network_name, driver="bridge", internal=True)
+                safe_log(
+                    f"Created docker bridge network {network_name} with internal=True "
+                    "(no public egress)",
+                    verbose=verbose,
+                )
+            except Exception as exc:
+                try:
+                    existing = client.networks.get(network_name)
+                except Exception:
+                    safe_log(
+                        f"Failed to create docker network {network_name}: {exc}",
+                        level=logging.ERROR,
+                        verbose=verbose,
+                    )
+                    raise
+        if existing is not None:
+            # If a previous run created the network as non-internal we can't
+            # silently upgrade it (would orphan running containers). Surface
+            # the divergence and proceed; the operator can ``docker network
+            # rm <name>`` to force a clean re-create.
+            attrs = getattr(existing, "attrs", {}) or {}
+            is_internal = bool(attrs.get("Internal"))
+            if not is_internal:
+                safe_log(
+                    f"Cost-proxy network {network_name} exists but is NOT internal; "
+                    "containers may have egress to public internet. Recreate the "
+                    "network to enforce lockdown: `docker network rm "
+                    f"{network_name}` and retry.",
+                    level=logging.WARNING,
+                    verbose=verbose,
+                )

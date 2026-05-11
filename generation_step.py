@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -34,6 +35,33 @@ from utils.gl_utils import (
     is_starting_node,
     process_meta_patch_files,
 )
+
+
+def _append_jsonl_file(src_path, dest_path):
+    if not os.path.exists(src_path):
+        return
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    fd = os.open(dest_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            with open(src_path, "rb") as src:
+                for line in src:
+                    if not line.strip():
+                        continue
+                    view = memoryview(line if line.endswith(b"\n") else line + b"\n")
+                    while view:
+                        written = os.write(fd, view)
+                        if written <= 0:
+                            raise OSError(f"short write while appending {dest_path}")
+                        view = view[written:]
+            os.fsync(fd)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def run_harness_polyglot(root_dir, output_dir, genid, *, model, skip_staged_eval=False, num_samples=-1):
@@ -98,9 +126,18 @@ def eval_produced_agent(
     eval_workers=10,
     eval_subset="_filtered_100_train",
     eval_test=False,
+    reasoning_effort=None,
+    splits=None,
 ):
-    # Evaluate the produced agent
-    splits = get_domain_splits(domain, eval_test=eval_test)
+    # F2c (recursive-scientist deviation): when ``splits`` is supplied
+    # (a non-None list[str]), iterate over exactly those splits instead
+    # of consulting the process-global ``get_domain_splits``. The host
+    # extension layer drives the train/val/test split selection through
+    # this real parameter so concurrent ``run_generation_step`` calls
+    # with different splits never race on a global lookup. Default
+    # behaviour (``splits=None``) is unchanged.
+    if splits is None:
+        splits = get_domain_splits(domain, eval_test=eval_test)
     for split in splits:  # pyright: ignore
         safe_log(f"Evaluating the produced agent on {domain} {eval_samples} {split}...")
         eval_run_id = f"{domain}_eval" if split == "train" else f"{domain}_eval_{split}"
@@ -128,6 +165,8 @@ def eval_produced_agent(
             "--model",
             model,
         ]
+        if reasoning_effort:
+            command += ["--reasoning_effort", reasoning_effort]
         exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
         log_container_output(exec_result)
         command = [
@@ -284,8 +323,44 @@ def run_generation_step(
     skip_staged_eval=False,
     iterations_left=0,
     *,
-    model,
+    model=None,
+    meta_agent_model=None,
+    task_agent_models=None,
+    reasoning_effort=None,
+    meta_agent_reasoning_effort=None,
+    task_agent_reasoning_efforts=None,
+    splits=None,
+    cost_proxy_enabled=None,
+    cost_proxy_network=None,
+    cost_proxy_health_url=None,
+    cost_proxy_deadline_ts=None,
+    cost_proxy_budget_usd=None,
 ):
+    # Per-role model routing: the legacy ``model`` keyword is the uniform
+    # fallback (still required by the polyglot harness path). ``meta_agent_model``
+    # overrides the meta-agent invocation only; ``task_agent_models`` is a
+    # per-domain map for the task-agent eval calls. Either path falls back to
+    # ``model`` when its specific entry is missing.
+    #
+    # ``reasoning_effort`` mirrors the per-role model shape: a uniform
+    # ``reasoning_effort`` is applied to both the meta-agent and every task-
+    # agent path; ``meta_agent_reasoning_effort`` and
+    # ``task_agent_reasoning_efforts`` (per-domain map) override the uniform
+    # value for their specific call site. ``None`` means "do not pass the
+    # parameter through" -- downstream agent.llm silently drops it for models
+    # that do not document support for it.
+    if model is None and meta_agent_model is None and not task_agent_models:
+        raise TypeError(
+            "run_generation_step requires `model=`, `meta_agent_model=`, or `task_agent_models=`"
+        )
+    meta_agent_model = meta_agent_model if meta_agent_model is not None else model
+    _task_agent_models = dict(task_agent_models or {})
+    meta_agent_reasoning_effort = (
+        meta_agent_reasoning_effort
+        if meta_agent_reasoning_effort is not None
+        else reasoning_effort
+    )
+    _task_agent_reasoning_efforts = dict(task_agent_reasoning_efforts or {})
     # Setup local output folder
     prev_gen_dir = os.path.join(output_dir, f"gen_{parent_genid}")
     gen_output_dir = os.path.join(output_dir, f"gen_{current_genid}")
@@ -312,6 +387,11 @@ def run_generation_step(
         image_name,
         container_name,
         domains=domains,
+        cost_proxy_enabled=cost_proxy_enabled,
+        cost_proxy_network=cost_proxy_network,
+        cost_proxy_health_url=cost_proxy_health_url,
+        cost_proxy_deadline_ts=cost_proxy_deadline_ts,
+        cost_proxy_budget_usd=cost_proxy_budget_usd,
     )
     container.start()
     container_output_folder = "/tmp/"
@@ -362,12 +442,21 @@ def run_generation_step(
                 "--iterations_left",
                 str(max(0, iterations_left)),
                 "--model",
-                model,
+                meta_agent_model,
             ]
+            if meta_agent_reasoning_effort:
+                command += ["--reasoning_effort", meta_agent_reasoning_effort]
 
             exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
             log_container_output(exec_result)
             metadata["parent_agent_success"] = exec_result.exit_code == 0
+            # F2i (recursive-scientist Tier 3 two-axis kill): persist the
+            # exit code so the host can distinguish a wall-clock kill
+            # (the in-container ``timeout 21600`` shell wrapper exits 124)
+            # from a clean-exit ``parent_agent_success=False`` (e.g. the
+            # meta-agent gave up on its own). The host writes
+            # ``killed_by="time"`` when this is 124.
+            metadata["meta_agent_exit_code"] = int(exec_result.exit_code or 0)
 
             # Copy container outputs to local
             local_agentoutput_folder = os.path.join(gen_output_dir, "agent_output/")
@@ -376,6 +465,29 @@ def run_generation_step(
                 source_path=container_agentoutput_folder,
                 dest_path=local_agentoutput_folder,
             )
+
+            # F-class: pull the updated llm_calls.jsonl back to the host so
+            # the host's rebuild_cost_md can re-render cost.md from the
+            # merged log. Best-effort -- the meta-agent may not have made
+            # any LLM calls if it errored early.
+            container_jsonl = os.path.join(
+                container_prev_eval_path, "llm_calls.jsonl"
+            )
+            host_jsonl = os.path.join(output_dir, "llm_calls.jsonl")
+            tmp_jsonl = os.path.join(
+                gen_output_dir,
+                f"llm_calls.{os.getpid()}.{current_genid}.{uuid.uuid4().hex}.jsonl",
+            )
+            try:
+                copy_from_container(
+                    container, source_path=container_jsonl, dest_path=tmp_jsonl
+                )
+                _append_jsonl_file(tmp_jsonl, host_jsonl)
+            except Exception as exc:
+                safe_log(f"warn: could not extract llm_calls.jsonl: {exc}")
+            finally:
+                if os.path.exists(tmp_jsonl):
+                    os.unlink(tmp_jsonl)
 
             # Check if agent produced a diff
             local_patch_file = os.path.join(
@@ -403,7 +515,11 @@ def run_generation_step(
                     eval_workers=eval_workers,
                     eval_subset=eval_subset,
                     eval_test=eval_test,
-                    model=model,
+                    model=_task_agent_models.get(domain, model),
+                    reasoning_effort=_task_agent_reasoning_efforts.get(
+                        domain, reasoning_effort
+                    ),
+                    splits=splits,
                 )
 
             # Small sample size evaluation for staged eval
@@ -513,6 +629,13 @@ if __name__ == "__main__":
         help="One or more domains to evaluate (must be from the allowed list)",
     )
     parser.add_argument("--model", type=str, required=True, help="Model to use")
+    parser.add_argument(
+        "--reasoning_effort",
+        type=str,
+        default=None,
+        choices=["low", "medium", "high"],
+        help="OpenAI-style reasoning_effort applied to meta + task agent calls",
+    )
     parser.add_argument("--iterations_left", type=int, default=0)
     parser.add_argument(
         "--eval_samples",
@@ -603,6 +726,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("--skip_meta_agent", default=False, action="store_true")
     parser.add_argument("--skip_eval_after_meta_agent", default=False, action="store_true")
+    parser.add_argument(
+        "--splits",
+        type=str,
+        nargs="+",
+        default=None,
+        choices=["train", "val", "test"],
+        help="F2c: explicit splits to evaluate (overrides get_domain_splits)",
+    )
     args = parser.parse_args()
 
     # Post-parse validation
@@ -650,6 +781,7 @@ if __name__ == "__main__":
         docker.from_env(),
         domains=args.domains,
         model=args.model,
+        reasoning_effort=args.reasoning_effort,
         run_id=run_id,
         iterations_left=args.iterations_left,
         output_dir=args.output_dir,
@@ -666,4 +798,5 @@ if __name__ == "__main__":
         run_eval_after_meta_agent=not args.skip_eval_after_meta_agent,
         eval_test=args.eval_test,
         skip_staged_eval=args.skip_staged_eval,
+        splits=args.splits,
     )

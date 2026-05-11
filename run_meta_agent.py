@@ -44,12 +44,28 @@ def main():
     parser.add_argument(
         "--outdir", required=False, default="./outputs/", help="Output directory"
     )
+    parser.add_argument(
+        "--reasoning_effort",
+        type=str,
+        default=None,
+        choices=["low", "medium", "high"],
+        help="OpenAI-style reasoning_effort applied to every meta-agent LLM call",
+    )
     args = parser.parse_args()
+
+    # F-class: in-container cost tracking. Appends one JSONL row per
+    # successful litellm.completion to a file the host extracts after
+    # the meta-agent finishes. Host then re-renders cost.md from the
+    # merged JSONL.
+    from agent._cost_tracker import init_cost_tracker
+
+    init_cost_tracker(os.path.join(args.evals_folder, "llm_calls.jsonl"))
 
     # Run meta agent
     meta_agent = MetaAgent(
         model=args.model,
         chat_history_file=args.chat_history_file,
+        reasoning_effort=args.reasoning_effort,
     )
     meta_agent.forward(
         repo_path=args.repo_path,
