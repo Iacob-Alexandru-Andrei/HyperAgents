@@ -57,9 +57,14 @@ def main():
     # successful litellm.completion to a file the host extracts after
     # the meta-agent finishes. Host then re-renders cost.md from the
     # merged JSONL.
+    #
+    # F2l Phase 3: written to /tmp/ (outside the git repo) so it does
+    # NOT get swept into the F2l lineage commit -- otherwise each
+    # child would inherit ancestors' jsonl entries via the patch chain
+    # and the host's append-only merge would double-count.
     from agent._cost_tracker import init_cost_tracker
 
-    init_cost_tracker(os.path.join(args.evals_folder, "llm_calls.jsonl"))
+    init_cost_tracker("/tmp/llm_calls.jsonl")
 
     # Run meta agent
     meta_agent = MetaAgent(

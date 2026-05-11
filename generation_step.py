@@ -18,7 +18,6 @@ from utils.docker_utils import (
     build_container,
     cleanup_container,
     copy_from_container,
-    copy_to_container,
     log_container_output,
     safe_log,
     setup_logger,
@@ -71,46 +70,50 @@ def _snapshot_train_lineage_in_container(
     container,
     current_genid,
     base_commit,
+    metadata=None,
     repo_name=REPO_NAME,
     verbose=True,
 ):
-    """F2l (recursive-scientist deviation): snapshot train-eval outputs into
-    ``/<repo_name>/lineage/gen_<current_genid>/`` inside the container and
-    commit. Excludes val/test eval directories (recognized by their
-    ``_eval_val`` / ``_eval_test`` suffix). Val/test stay copy-out only.
+    """F2l: snapshot per-gen lineage into ``/<repo_name>/lineage/gen_<id>/``
+    and commit. This is the SOLE channel through which a child container
+    inherits its parent's artifacts — no host-side tar fallback.
 
-    After this call:
-    - ``lineage/gen_<current_genid>/<domain>_eval/predictions.csv`` (and any
-      other harness-produced files in that directory) are tracked in git.
-    - ``meta_agent_chat_history.md`` is copied into the same gen dir.
-    - A single commit captures both the lineage delta AND any untracked
-      meta-agent code edits (``git add -A`` before commit). The commit
-      message is deterministic so re-runs are idempotent in audits.
+    Captured per gen:
+      - ``<domain>_eval/`` (train predictions). Val/test eval dirs are
+        excluded because their dirname suffix (``_eval_val`` / ``_eval_test``)
+        doesn't match the ``/tmp/*_eval`` glob.
+      - ``agent_output/`` (full dir — meta_agent_chat_history.md +
+        model_patch.diff + any other artifacts the meta-agent wrote).
+      - ``metadata.json`` (stub with fields known at snapshot time:
+        current_genid, parent_genid, parent_agent_success, run_eval,
+        etc. The host writes the authoritative metadata.json on its
+        side after this function returns; this stub is what *child*
+        containers see for ancestor lookups).
 
-    The richer model_patch.diff (now covering code + lineage) is emitted
-    by the caller via ``git diff --binary <base_commit>`` after this
-    function returns, written over the existing /tmp/agent_output/
-    location so the host's subsequent ``copy_from_container`` fetches
-    the full-fidelity patch.
+    A single ``git add -A`` + commit captures the lineage delta AND any
+    untracked meta-agent code edits. ``--allow-empty`` makes the call
+    idempotent for a node that produced no eval output.
+
+    The richer ``model_patch.diff`` covering code + lineage is emitted by
+    the caller via ``git diff --binary <base_commit>`` after this
+    function returns.
     """
     quoted_id = shlex.quote(str(current_genid))
     lineage_dir = f"/{repo_name}/lineage/gen_{quoted_id}"
-    # Build the shell command as a heredoc-style block so the loop runs
-    # cleanly inside ``sh -c``. We mkdir, copy every ``/tmp/<x>_eval``
-    # directory that doesn't have a ``_val`` or ``_test`` suffix in its
-    # parent name, and copy the chat-history file alongside.
+    metadata_payload = json.dumps(metadata or {}, indent=2, default=str)
+    metadata_quoted = shlex.quote(metadata_payload)
     cmd = (
         f"set -e ; "
         f"mkdir -p {lineage_dir} ; "
         f"for d in /tmp/*_eval ; do "
-        f"  if [ -d \"$d\" ] ; then "
-        f"    cp -r \"$d\" \"{lineage_dir}/\" ; "
+        f'  if [ -d "$d" ] ; then '
+        f'    cp -r "$d" "{lineage_dir}/" ; '
         f"  fi ; "
         f"done ; "
-        f"if [ -f /tmp/agent_output/meta_agent_chat_history.md ] ; then "
-        f"  cp /tmp/agent_output/meta_agent_chat_history.md "
-        f"     {lineage_dir}/meta_agent_chat_history.md ; "
+        f"if [ -d /tmp/agent_output ] ; then "
+        f"  cp -r /tmp/agent_output {lineage_dir}/agent_output ; "
         f"fi ; "
+        f"printf '%s\\n' {metadata_quoted} > {lineage_dir}/metadata.json ; "
         f"echo F2L_SNAPSHOT_COMPLETE"
     )
     exec_result = container.exec_run(
@@ -279,116 +282,6 @@ def eval_produced_agent(
         )
 
 
-def copy_prev_eval_to_container(
-    container,
-    prev_eval_path,
-    container_output_folder,
-    current_genid=None,
-    parent_genid=None,
-    container_folder_name=None,
-):
-    """Copy the entire prev_eval_path into the container, then remove unwanted files/dirs in the container"""
-    if not os.path.exists(prev_eval_path):
-        raise FileNotFoundError(f"Previous eval path not found: {prev_eval_path}")
-
-    # Normalize and construct destination path in container
-    prev_eval_path = os.path.normpath(prev_eval_path)
-    tail = os.path.join(*prev_eval_path.split(os.sep)[-1:])
-    container_prev_eval_path = os.path.join(container_output_folder, tail)
-
-    # Ensure destination parent exists
-    container.exec_run(["mkdir", "-p", container_output_folder], workdir="/")
-
-    # Copy the whole tree into the container in one go
-    copy_to_container(
-        container, source_path=prev_eval_path, dest_path=container_prev_eval_path
-    )
-
-    lineage_gen_dirs = _lineage_gen_dirs(prev_eval_path, parent_genid)
-    non_lineage_prune_cmds = _non_lineage_prune_cmds(
-        prev_eval_path, container_prev_eval_path, lineage_gen_dirs
-    )
-
-    # Now prune inside the container
-    prune_cmds = [
-        *non_lineage_prune_cmds,
-        # Remove current genid folder
-        f"find '{container_prev_eval_path}' -type d -name 'gen_{current_genid}' -prune -exec rm -rf {{}} +",
-        # 1) Remove val/test eval directories
-        f"find '{container_prev_eval_path}' -type d -name '*_eval_val*' -prune -exec rm -rf {{}} +",
-        f"find '{container_prev_eval_path}' -type d -name '*_eval_test*' -prune -exec rm -rf {{}} +",
-        # 2) Remove any directories containing the repo name (copied worktrees, etc.)
-        f"find '{container_prev_eval_path}' -type d -name '*{REPO_NAME}*' -prune -exec rm -rf {{}} +",
-        # 3) Remove compiled Python files
-        f"find '{container_prev_eval_path}' -type f -name '*.pyc' -delete",
-        # 4) Remove files whose base name indicates val/test (with/without extensions)
-        #    *_val, *_val.*, *_val_*, and same for _test
-        f"find '{container_prev_eval_path}' -type f \\( -name '*_val' -o -name '*_val.*' -o -name '*_val_*' \\) -delete",
-        f"find '{container_prev_eval_path}' -type f \\( -name '*_test' -o -name '*_test.*' -o -name '*_test_*' \\) -delete",
-    ]
-
-    for cmd in prune_cmds:
-        exec_result = container.exec_run(["bash", "-lc", cmd], workdir="/")
-
-    # Confirm files remaining were copied
-    exec_result = container.exec_run(
-        ["ls", "-l", container_prev_eval_path], workdir="/"
-    )
-    log_container_output(exec_result)
-
-    # Move the folder to a new name
-    if container_folder_name is not None:
-        new_container_prev_eval_path = os.path.join(
-            container_output_folder, container_folder_name
-        )
-        container.exec_run(
-            ["mv", container_prev_eval_path, new_container_prev_eval_path], workdir="/"
-        )
-        log_container_output(exec_result)
-        container_prev_eval_path = new_container_prev_eval_path
-
-    return container_prev_eval_path
-
-
-def _lineage_gen_dirs(output_dir, parent_genid):
-    if parent_genid is None:
-        return set()
-
-    lineage_gen_dirs = set()
-    seen = set()
-    genid = parent_genid
-    while genid is not None and genid not in seen:
-        seen.add(genid)
-        lineage_gen_dirs.add(f"gen_{genid}")
-        genid = _read_parent_genid(output_dir, genid)
-
-    return lineage_gen_dirs
-
-
-def _non_lineage_prune_cmds(prev_eval_path, container_prev_eval_path, lineage_gen_dirs):
-    non_lineage_prune_cmds = []
-    if not lineage_gen_dirs:
-        return non_lineage_prune_cmds
-    for name in os.listdir(prev_eval_path):
-        if name not in lineage_gen_dirs:
-            non_lineage_prune_cmds.append(
-                f"find '{container_prev_eval_path}' -mindepth 1 -maxdepth 1 -name '{name}' -exec rm -rf {{}} +"
-            )
-    return non_lineage_prune_cmds
-
-
-def _read_parent_genid(output_dir, genid):
-    metadata_file = os.path.join(output_dir, f"gen_{genid}", "metadata.json")
-    if not os.path.exists(metadata_file):
-        return None
-    with open(metadata_file, "r") as f:
-        metadata = json.load(f)
-    parent_genid = metadata.get("parent_genid")
-    if parent_genid == -1 or parent_genid == "-1":
-        return None
-    return parent_genid
-
-
 def run_generation_step(
     docker_client,
     domains,
@@ -495,9 +388,15 @@ def run_generation_step(
         commit_hash = apply_diffs_container(container, patch_files)
 
         if run_meta_agent:
-            # Copy previous generations to container
-            container_prev_eval_path = copy_prev_eval_to_container(
-                container, output_dir, container_output_folder, current_genid=current_genid, parent_genid=parent_genid,
+            # F2l Phase 3 (recursive-scientist deviation): the parent's
+            # train-eval lineage already landed in /<REPO_NAME>/lineage/
+            # via the patches applied above. No host-side tar of
+            # output_dir is needed -- predictions, agent_output/, and
+            # metadata.json all flow via patches. The meta-agent's
+            # eval_path simply points at the lineage tree.
+            container_prev_eval_path = f"/{REPO_NAME}/lineage"
+            container.exec_run(
+                ["mkdir", "-p", container_prev_eval_path], workdir="/"
             )
 
             # Run meta agent
@@ -556,9 +455,11 @@ def run_generation_step(
             # the host's rebuild_cost_md can re-render cost.md from the
             # merged log. Best-effort -- the meta-agent may not have made
             # any LLM calls if it errored early.
-            container_jsonl = os.path.join(
-                container_prev_eval_path, "llm_calls.jsonl"
-            )
+            #
+            # F2l Phase 3: the cost tracker writes to /tmp/llm_calls.jsonl
+            # (outside the git repo) so the file doesn't sneak into the
+            # lineage patches and propagate cumulatively to every child.
+            container_jsonl = "/tmp/llm_calls.jsonl"
             host_jsonl = os.path.join(output_dir, "llm_calls.jsonl")
             tmp_jsonl = os.path.join(
                 gen_output_dir,
@@ -658,25 +559,29 @@ def run_generation_step(
                 metadata["run_full_eval"] = True
 
             # F2l (recursive-scientist deviation): snapshot train-eval
-            # outputs into ``/<REPO_NAME>/lineage/gen_<id>/`` and rewrite
-            # model_patch.diff so it carries code + train lineage as one
-            # patch. Child containers that ``git apply`` this richer
-            # patch get the parent's train predictions in their working
-            # tree without any host-side tar-of-output_dir.
+            # outputs, agent_output/, and a metadata.json stub into
+            # ``/<REPO_NAME>/lineage/gen_<id>/`` and rewrite
+            # model_patch.diff so it carries code + lineage as one
+            # patch. Child containers that ``patch -p1`` this richer
+            # patch get the full parent state in their working tree
+            # without any host-side tar-of-output_dir.
             #
-            # Phase 1: additive. ``copy_prev_eval_to_container`` is still
-            # active on the host as the load-bearing path. After child
-            # containers verify they receive the lineage via this patch
-            # (Phase 2), the parallel host-side tar is removed (Phase 3).
+            # Phase 3: this is now the LOAD-BEARING path.
+            # ``copy_prev_eval_to_container`` has been deleted; the
+            # meta-agent's eval_path points at
+            # ``/<REPO_NAME>/lineage/`` and reads ancestor data from
+            # the per-gen subdirs delivered via patches.
             #
-            # On failure, log + suppress: this is additive scaffolding;
-            # any error here must not block the production train+val
-            # flow that already completed above.
+            # On failure of the snapshot itself we log + suppress (it
+            # is best-effort) but production flow continues — the host
+            # already has the train/val outcomes from the eval block
+            # above; what we lose is the child's view of this parent.
             try:
                 _snapshot_train_lineage_in_container(
                     container,
                     current_genid=current_genid,
                     base_commit=commit_hash,
+                    metadata=metadata,
                     verbose=False,
                 )
                 # Preserve the existing (pre-eval, code-only) patch under

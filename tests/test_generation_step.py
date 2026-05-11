@@ -37,11 +37,6 @@ def _install_generation_fakes(
     monkeypatch.setattr(generation_step, "safe_log", lambda *args, **kwargs: None)
     monkeypatch.setattr(generation_step, "log_container_output", lambda *args, **kwargs: None)
     monkeypatch.setattr(generation_step, "apply_diffs_container", lambda container, patches: "base")
-    monkeypatch.setattr(
-        generation_step,
-        "copy_prev_eval_to_container",
-        lambda *args, **kwargs: "/tmp/prev_eval",
-    )
     monkeypatch.setattr(generation_step, "run_commands_to_check_compilation", lambda container: None)
     monkeypatch.setattr(generation_step, "get_score", lambda *args, **kwargs: None)
 
@@ -176,6 +171,7 @@ def test_f2l_snapshot_helper_issues_expected_shell_sequence(
         container,
         current_genid=42,
         base_commit="abcdef1",
+        metadata={"current_genid": 42, "parent_genid": 7},
         verbose=False,
     )
 
@@ -190,12 +186,16 @@ def test_f2l_snapshot_helper_issues_expected_shell_sequence(
     assert add_workdir == expected_workdir
     assert commit_workdir == expected_workdir
 
-    # Step 1: mkdir + cp + chat-history copy.
+    # Step 1: mkdir + cp train eval dirs + cp agent_output + write metadata.json.
     cp_payload = cp_cmd[2]
     assert "mkdir -p" in cp_payload
-    assert f"lineage/gen_42" in cp_payload
+    assert "lineage/gen_42" in cp_payload
     assert "/tmp/*_eval" in cp_payload
-    assert "meta_agent_chat_history.md" in cp_payload
+    assert "cp -r /tmp/agent_output" in cp_payload
+    assert "metadata.json" in cp_payload
+    # Stub payload contains the metadata we passed in.
+    assert '"current_genid": 42' in cp_payload
+    assert '"parent_genid": 7' in cp_payload
 
     # Step 2: stage everything.
     assert add_cmd == ["/bin/sh", "-c", "git add -A"]
@@ -389,4 +389,158 @@ def test_run_generation_step_f2l_failure_does_not_abort_flow(
     # F2l failure was logged.
     assert any("F2l lineage snapshot skipped" in msg for msg in logged), (
         f"expected F2l skip log, got: {logged}"
+    )
+
+
+# ----- F2l Phase 3 (no copy-tar fallback) -----------------------------------
+
+
+def test_phase3_copy_prev_eval_to_container_is_gone() -> None:
+    """The host-side tar of output_dir is deleted in Phase 3. The
+    module must no longer expose ``copy_prev_eval_to_container`` or
+    its helpers (``_lineage_gen_dirs``, ``_non_lineage_prune_cmds``,
+    ``_read_parent_genid``)."""
+    for name in (
+        "copy_prev_eval_to_container",
+        "_lineage_gen_dirs",
+        "_non_lineage_prune_cmds",
+        "_read_parent_genid",
+    ):
+        assert not hasattr(generation_step, name), (
+            f"{name} should be deleted in F2l Phase 3 — found it still "
+            f"exported from generation_step"
+        )
+
+
+def test_phase3_meta_agent_evals_folder_points_at_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The meta-agent command must pass
+    ``--evals_folder /<REPO_NAME>/lineage`` -- the lineage tree
+    delivered by patches is the SOLE source of ancestor artifacts."""
+    container, _ = _install_generation_fakes(
+        monkeypatch,
+        "diff --git a/task_agent.py b/task_agent.py\n",
+    )
+
+    generation_step.run_generation_step(
+        docker_client=object(),
+        domains=["paper_review"],
+        output_dir=str(tmp_path),
+        run_id="unit",
+        current_genid=1,
+        parent_genid="initial",
+        root_dir=str(tmp_path / "root"),
+        root_commit="root",
+        eval_samples=[1],
+        eval_workers=1,
+        eval_subsets=[""],
+        parent_patch_files=[],
+        run_eval_after_meta_agent=False,
+        skip_staged_eval=True,
+        iterations_left=1,
+        model="fake",
+    )
+
+    meta_cmd = _meta_agent_command(container)
+    evals_idx = meta_cmd.index("--evals_folder")
+    assert meta_cmd[evals_idx + 1] == f"/{generation_step.REPO_NAME}/lineage"
+
+
+def test_phase3_snapshot_passes_metadata_stub(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """End-to-end: the F2l snapshot helper receives the live metadata
+    dict so the in-container metadata.json stub reflects what the host
+    will eventually persist for this gen."""
+    _install_generation_fakes(
+        monkeypatch,
+        "diff --git a/task_agent.py b/task_agent.py\n",
+    )
+
+    captured_kwargs: dict[str, object] = {}
+
+    def _capturing_snapshot(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return kwargs.get("base_commit")
+
+    monkeypatch.setattr(
+        generation_step,
+        "_snapshot_train_lineage_in_container",
+        _capturing_snapshot,
+    )
+
+    generation_step.run_generation_step(
+        docker_client=object(),
+        domains=["paper_review"],
+        output_dir=str(tmp_path),
+        run_id="unit",
+        current_genid=3,
+        parent_genid=2,
+        root_dir=str(tmp_path / "root"),
+        root_commit="root",
+        eval_samples=[1],
+        eval_workers=1,
+        eval_subsets=[""],
+        parent_patch_files=[],
+        run_eval_after_meta_agent=True,
+        skip_staged_eval=True,
+        iterations_left=1,
+        model="fake",
+    )
+
+    assert "metadata" in captured_kwargs
+    md = captured_kwargs["metadata"]
+    assert isinstance(md, dict)
+    assert md["current_genid"] == 3
+    assert md["parent_genid"] == 2
+    assert md["parent_agent_success"] is True
+    assert md["run_eval"] is True
+
+
+def test_phase3_llm_calls_extracted_from_tmp(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The cost tracker writes ``/tmp/llm_calls.jsonl`` (outside the
+    git repo) so the file does not get swept into the lineage commit.
+    The host's copy_from_container call must use that path, not a path
+    inside the lineage tree."""
+    _install_generation_fakes(
+        monkeypatch,
+        "diff --git a/task_agent.py b/task_agent.py\n",
+    )
+
+    captured_sources: list[str] = []
+    real_copy_from = generation_step.copy_from_container
+
+    def tracking(container, source_path, dest_path):
+        captured_sources.append(str(source_path))
+        real_copy_from(container, source_path, dest_path)
+
+    monkeypatch.setattr(generation_step, "copy_from_container", tracking)
+
+    generation_step.run_generation_step(
+        docker_client=object(),
+        domains=["paper_review"],
+        output_dir=str(tmp_path),
+        run_id="unit",
+        current_genid=1,
+        parent_genid="initial",
+        root_dir=str(tmp_path / "root"),
+        root_commit="root",
+        eval_samples=[1],
+        eval_workers=1,
+        eval_subsets=[""],
+        parent_patch_files=[],
+        run_eval_after_meta_agent=False,
+        skip_staged_eval=True,
+        iterations_left=1,
+        model="fake",
+    )
+
+    assert "/tmp/llm_calls.jsonl" in captured_sources, (
+        f"expected /tmp/llm_calls.jsonl in extracted sources, got: {captured_sources}"
     )
