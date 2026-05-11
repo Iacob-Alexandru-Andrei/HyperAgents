@@ -51,26 +51,20 @@ def main():
         choices=["low", "medium", "high"],
         help="OpenAI-style reasoning_effort applied to every meta-agent LLM call",
     )
+    parser.add_argument(
+        "--budget_status_path",
+        type=str,
+        default=None,
+        help="Path to the live budget status markdown injected into every chat turn",
+    )
     args = parser.parse_args()
-
-    # F-class: in-container cost tracking. Appends one JSONL row per
-    # successful litellm.completion to a file the host extracts after
-    # the meta-agent finishes. Host then re-renders cost.md from the
-    # merged JSONL.
-    #
-    # F2l Phase 3: written to /tmp/ (outside the git repo) so it does
-    # NOT get swept into the F2l lineage commit -- otherwise each
-    # child would inherit ancestors' jsonl entries via the patch chain
-    # and the host's append-only merge would double-count.
-    from agent._cost_tracker import init_cost_tracker
-
-    init_cost_tracker("/tmp/llm_calls.jsonl")
 
     # Run meta agent
     meta_agent = MetaAgent(
         model=args.model,
         chat_history_file=args.chat_history_file,
         reasoning_effort=args.reasoning_effort,
+        budget_status_path=args.budget_status_path,
     )
     meta_agent.forward(
         repo_path=args.repo_path,

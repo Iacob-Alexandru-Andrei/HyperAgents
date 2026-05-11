@@ -6,7 +6,6 @@ import logging
 import os
 import shutil
 import shlex
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -37,34 +36,6 @@ from utils.gl_utils import (
     is_starting_node,
     process_meta_patch_files,
 )
-
-
-def _append_jsonl_file(src_path, dest_path):
-    if not os.path.exists(src_path):
-        return
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    fd = os.open(dest_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-    try:
-        import fcntl
-
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        try:
-            with open(src_path, "rb") as src:
-                for line in src:
-                    if not line.strip():
-                        continue
-                    view = memoryview(line if line.endswith(b"\n") else line + b"\n")
-                    while view:
-                        written = os.write(fd, view)
-                        if written <= 0:
-                            raise OSError(f"short write while appending {dest_path}")
-                        view = view[written:]
-            os.fsync(fd)
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
-
 
 def _snapshot_train_lineage_in_container(
     container,
@@ -217,6 +188,7 @@ def eval_produced_agent(
     eval_test=False,
     reasoning_effort=None,
     splits=None,
+    budget_status_path=None,
 ):
     # F2c (recursive-scientist deviation): when ``splits`` is supplied
     # (a non-None list[str]), iterate over exactly those splits instead
@@ -256,6 +228,8 @@ def eval_produced_agent(
         ]
         if reasoning_effort:
             command += ["--reasoning_effort", reasoning_effort]
+        if budget_status_path:
+            command += ["--budget_status_path", budget_status_path]
         exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
         log_container_output(exec_result)
         command = [
@@ -311,9 +285,7 @@ def run_generation_step(
     splits=None,
     cost_proxy_enabled=None,
     cost_proxy_network=None,
-    cost_proxy_health_url=None,
-    cost_proxy_deadline_ts=None,
-    cost_proxy_budget_usd=None,
+    budget_status_path=None,
 ):
     # Per-role model routing: the legacy ``model`` keyword is the uniform
     # fallback (still required by the polyglot harness path). ``meta_agent_model``
@@ -368,9 +340,6 @@ def run_generation_step(
         domains=domains,
         cost_proxy_enabled=cost_proxy_enabled,
         cost_proxy_network=cost_proxy_network,
-        cost_proxy_health_url=cost_proxy_health_url,
-        cost_proxy_deadline_ts=cost_proxy_deadline_ts,
-        cost_proxy_budget_usd=cost_proxy_budget_usd,
     )
     container.start()
     container_output_folder = "/tmp/"
@@ -444,6 +413,8 @@ def run_generation_step(
             ]
             if meta_agent_reasoning_effort:
                 command += ["--reasoning_effort", meta_agent_reasoning_effort]
+            if budget_status_path:
+                command += ["--budget_status_path", budget_status_path]
 
             exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
             log_container_output(exec_result)
@@ -465,31 +436,6 @@ def run_generation_step(
                 source_path=container_agentoutput_folder,
                 dest_path=local_agentoutput_folder,
             )
-
-            # F-class: pull the updated llm_calls.jsonl back to the host so
-            # the host's rebuild_cost_md can re-render cost.md from the
-            # merged log. Best-effort -- the meta-agent may not have made
-            # any LLM calls if it errored early.
-            #
-            # F2l Phase 3: the cost tracker writes to /tmp/llm_calls.jsonl
-            # (outside the git repo) so the file doesn't sneak into the
-            # lineage patches and propagate cumulatively to every child.
-            container_jsonl = "/tmp/llm_calls.jsonl"
-            host_jsonl = os.path.join(output_dir, "llm_calls.jsonl")
-            tmp_jsonl = os.path.join(
-                gen_output_dir,
-                f"llm_calls.{os.getpid()}.{current_genid}.{uuid.uuid4().hex}.jsonl",
-            )
-            try:
-                copy_from_container(
-                    container, source_path=container_jsonl, dest_path=tmp_jsonl
-                )
-                _append_jsonl_file(tmp_jsonl, host_jsonl)
-            except Exception as exc:
-                safe_log(f"warn: could not extract llm_calls.jsonl: {exc}")
-            finally:
-                if os.path.exists(tmp_jsonl):
-                    os.unlink(tmp_jsonl)
 
             # Check if agent produced a diff
             local_patch_file = os.path.join(
@@ -522,6 +468,7 @@ def run_generation_step(
                         domain, reasoning_effort
                     ),
                     splits=splits,
+                    budget_status_path=budget_status_path,
                 )
 
             # Small sample size evaluation for staged eval
@@ -727,6 +674,7 @@ if __name__ == "__main__":
         help="OpenAI-style reasoning_effort applied to meta + task agent calls",
     )
     parser.add_argument("--iterations_left", type=int, default=0)
+    parser.add_argument("--budget_status_path", type=str, default=None)
     parser.add_argument(
         "--eval_samples",
         type=int,
@@ -889,4 +837,5 @@ if __name__ == "__main__":
         eval_test=args.eval_test,
         skip_staged_eval=args.skip_staged_eval,
         splits=args.splits,
+        budget_status_path=args.budget_status_path,
     )

@@ -500,52 +500,6 @@ def test_phase3_snapshot_passes_metadata_stub(
     assert md["run_eval"] is True
 
 
-def test_phase3_llm_calls_extracted_from_tmp(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """The cost tracker writes ``/tmp/llm_calls.jsonl`` (outside the
-    git repo) so the file does not get swept into the lineage commit.
-    The host's copy_from_container call must use that path, not a path
-    inside the lineage tree."""
-    _install_generation_fakes(
-        monkeypatch,
-        "diff --git a/task_agent.py b/task_agent.py\n",
-    )
-
-    captured_sources: list[str] = []
-    real_copy_from = generation_step.copy_from_container
-
-    def tracking(container, source_path, dest_path):
-        captured_sources.append(str(source_path))
-        real_copy_from(container, source_path, dest_path)
-
-    monkeypatch.setattr(generation_step, "copy_from_container", tracking)
-
-    generation_step.run_generation_step(
-        docker_client=object(),
-        domains=["paper_review"],
-        output_dir=str(tmp_path),
-        run_id="unit",
-        current_genid=1,
-        parent_genid="initial",
-        root_dir=str(tmp_path / "root"),
-        root_commit="root",
-        eval_samples=[1],
-        eval_workers=1,
-        eval_subsets=[""],
-        parent_patch_files=[],
-        run_eval_after_meta_agent=False,
-        skip_staged_eval=True,
-        iterations_left=1,
-        model="fake",
-    )
-
-    assert "/tmp/llm_calls.jsonl" in captured_sources, (
-        f"expected /tmp/llm_calls.jsonl in extracted sources, got: {captured_sources}"
-    )
-
-
 def test_phase3_bootstrap_eval_runs_f2l_without_unbound_locals(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -3,9 +3,16 @@ from agent.llm_withtools import chat_with_agent
 from utils.common import extract_jsons
 
 class TaskAgent(AgentSystem):
-    def __init__(self, model, chat_history_file='./outputs/chat_history.md', reasoning_effort=None):
+    def __init__(
+        self,
+        model,
+        chat_history_file='./outputs/chat_history.md',
+        reasoning_effort=None,
+        budget_status_path=None,
+    ):
         super().__init__(model=model, chat_history_file=chat_history_file)
         self.reasoning_effort = reasoning_effort
+        self.budget_status_path = budget_status_path
 
     MAX_PARSE_RETRIES = 3
 
@@ -47,6 +54,7 @@ Task input:
                 msg_history=new_msg_history,
                 logging=self.log,
                 reasoning_effort=self.reasoning_effort,
+                budget_status_path=self.budget_status_path,
             )
             try:
                 extracted_jsons = extract_jsons(new_msg_history[-1]['text'])

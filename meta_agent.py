@@ -7,9 +7,16 @@ from agent.base_agent import AgentSystem
 from agent.llm_withtools import chat_with_agent
 
 class MetaAgent(AgentSystem):
-    def __init__(self, model, chat_history_file='./outputs/chat_history.md', reasoning_effort=None):
+    def __init__(
+        self,
+        model,
+        chat_history_file='./outputs/chat_history.md',
+        reasoning_effort=None,
+        budget_status_path=None,
+    ):
         super().__init__(model=model, chat_history_file=chat_history_file)
         self.reasoning_effort = reasoning_effort
+        self.budget_status_path = budget_status_path
 
     def forward(self, repo_path, eval_path, iterations_left=None):
         """
@@ -99,4 +106,5 @@ class MetaAgent(AgentSystem):
             tools_available='all',
             reasoning_effort=self.reasoning_effort,
             catalog=catalog,
+            budget_status_path=self.budget_status_path,
         )
