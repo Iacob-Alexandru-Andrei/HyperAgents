@@ -387,6 +387,22 @@ def run_generation_step(
         metadata["prev_patch_files"] += patch_files
         commit_hash = apply_diffs_container(container, patch_files)
 
+        # F2l Phase 3 (recursive-scientist deviation): define agent_output
+        # paths and ensure both ends (host + container) exist
+        # unconditionally. The bootstrap eval path (run_meta_agent=False)
+        # still needs these so F2l can snapshot its eval results into
+        # /<REPO_NAME>/lineage/gen_initial/ and emit a model_patch.diff
+        # that descendants apply -- without this lift, the F2l block
+        # crashes with UnboundLocalError on gen_initial.
+        local_agentoutput_folder = os.path.join(gen_output_dir, "agent_output/")
+        container_agentoutput_folder = os.path.join(
+            container_output_folder, "agent_output"
+        )
+        os.makedirs(local_agentoutput_folder, exist_ok=True)
+        container.exec_run(
+            ["mkdir", "-p", container_agentoutput_folder], workdir="/"
+        )
+
         if run_meta_agent:
             # F2l Phase 3 (recursive-scientist deviation): the parent's
             # train-eval lineage already landed in /<REPO_NAME>/lineage/
@@ -401,9 +417,6 @@ def run_generation_step(
 
             # Run meta agent
             safe_log("Running meta agent...")
-            container_agentoutput_folder = os.path.join(
-                container_output_folder, "agent_output"
-            )
             container_chat_history_file = os.path.join(
                 container_agentoutput_folder, "meta_agent_chat_history.md"
             )
@@ -443,8 +456,10 @@ def run_generation_step(
             # ``killed_by="time"`` when this is 124.
             metadata["meta_agent_exit_code"] = int(exec_result.exit_code or 0)
 
-            # Copy container outputs to local
-            local_agentoutput_folder = os.path.join(gen_output_dir, "agent_output/")
+            # Copy container outputs to local. ``local_agentoutput_folder``
+            # is defined unconditionally above the ``if run_meta_agent``
+            # block so the F2l flow can also reach it on the bootstrap
+            # eval path.
             copy_from_container(
                 container,
                 source_path=container_agentoutput_folder,
@@ -631,6 +646,20 @@ def run_generation_step(
                     f"F2l lineage snapshot skipped: {lineage_exc}",
                     level=logging.WARNING,
                 )
+
+            # F2l Phase 3: register the (possibly F2l-regenerated)
+            # ``model_patch.diff`` in ``curr_patch_files`` when it is
+            # genuinely present and non-empty. This is the canonical
+            # place for the bootstrap eval path (run_meta_agent=False)
+            # to publish its F2l-generated patch -- the meta-agent
+            # branch above already appended the path eagerly. Idempotent:
+            # we don't duplicate if the path is already in the list.
+            final_patch = os.path.join(local_agentoutput_folder, "model_patch.diff")
+            if (
+                file_exist_and_not_empty(final_patch)
+                and final_patch not in metadata["curr_patch_files"]
+            ):
+                metadata["curr_patch_files"].append(final_patch)
 
     except Exception as e:
         safe_log(f"Error in generate: {e}")

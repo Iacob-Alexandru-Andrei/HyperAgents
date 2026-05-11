@@ -544,3 +544,89 @@ def test_phase3_llm_calls_extracted_from_tmp(
     assert "/tmp/llm_calls.jsonl" in captured_sources, (
         f"expected /tmp/llm_calls.jsonl in extracted sources, got: {captured_sources}"
     )
+
+
+def test_phase3_bootstrap_eval_runs_f2l_without_unbound_locals(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression: gen_initial's baseline eval calls run_generation_step
+    with ``run_meta_agent=False`` (see ``generate_loop.py:241``). Before
+    this fix the F2l block crashed with UnboundLocalError on
+    ``local_agentoutput_folder`` because that variable was defined
+    inside the ``if run_meta_agent`` branch. Without F2l running, the
+    bootstrap's lineage never propagates to children via patches.
+
+    This test exercises the bootstrap path end-to-end:
+
+      - ``run_meta_agent=False`` (no meta-agent invocation)
+      - eval still runs (``run_eval = not run_meta_agent`` upstream)
+      - F2l snapshot helper is called (the call site doesn't crash)
+      - ``model_patch.diff`` ends up registered in ``curr_patch_files``
+        when it exists and is non-empty.
+    """
+    snapshot_patch_text = (
+        "diff --git a/lineage/gen_initial/paper_review_eval/predictions.csv "
+        "b/lineage/gen_initial/paper_review_eval/predictions.csv\n"
+        "new file mode 100644\n"
+    )
+    container, _ = _install_generation_fakes(monkeypatch, snapshot_patch_text)
+
+    snapshot_called = {"hits": 0}
+
+    def _capturing_snapshot(*args, **kwargs):
+        snapshot_called["hits"] += 1
+        return kwargs.get("base_commit")
+
+    monkeypatch.setattr(
+        generation_step,
+        "_snapshot_train_lineage_in_container",
+        _capturing_snapshot,
+    )
+
+    # Stand in for the in-container ``git diff --binary`` copy-back:
+    # write non-empty content at the host model_patch.diff path so
+    # the unconditional append guard recognizes a real patch.
+    real_copy_from = generation_step.copy_from_container
+
+    def writing_copy_from(container, source_path, dest_path):
+        if str(source_path).endswith("model_patch.diff"):
+            target = Path(dest_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(snapshot_patch_text, encoding="utf-8")
+            return
+        real_copy_from(container, source_path, dest_path)
+
+    monkeypatch.setattr(generation_step, "copy_from_container", writing_copy_from)
+
+    metadata = generation_step.run_generation_step(
+        docker_client=object(),
+        domains=["paper_review"],
+        output_dir=str(tmp_path),
+        run_id="unit-bootstrap",
+        current_genid="initial",
+        parent_genid="initial",
+        root_dir=str(tmp_path / "root"),
+        root_commit="root",
+        eval_samples=[1],
+        eval_workers=1,
+        eval_subsets=[""],
+        parent_patch_files=[],
+        run_meta_agent=False,
+        run_eval_after_meta_agent=False,
+        skip_staged_eval=True,
+        iterations_left=0,
+        model="fake",
+    )
+
+    # F2l fired on the bootstrap path (this is the regression).
+    assert snapshot_called["hits"] == 1, (
+        f"expected snapshot helper to fire exactly once on bootstrap, "
+        f"got {snapshot_called['hits']}"
+    )
+
+    # The F2l-generated patch is registered for child consumption.
+    expected_patch = str(tmp_path / "gen_initial" / "agent_output" / "model_patch.diff")
+    assert expected_patch in metadata["curr_patch_files"], (
+        f"expected {expected_patch} in curr_patch_files, got: {metadata['curr_patch_files']}"
+    )
