@@ -234,6 +234,25 @@ def copy_prev_eval_to_container(
         container, source_path=prev_eval_path, dest_path=container_prev_eval_path
     )
 
+    # When the run dir uses the v2 layout (gens/, pending/ subdirs), also
+    # copy the ancestor gens from the sibling `gens/` so the meta-agent
+    # sees every ancestor's predictions / chat history / metadata under
+    # the same eval_path tree. In v1 there is no gens/ subdir; the walk
+    # above already covered everything.
+    gens_root = os.path.join(os.path.dirname(prev_eval_path), "gens")
+    if prev_eval_path.endswith("/pending") and os.path.isdir(gens_root):
+        for entry in os.listdir(gens_root):
+            if not entry.startswith("gen_"):
+                continue
+            src = os.path.join(gens_root, entry)
+            if not os.path.isdir(src):
+                continue
+            copy_to_container(
+                container,
+                source_path=src,
+                dest_path=os.path.join(container_prev_eval_path, entry),
+            )
+
     lineage_gen_dirs = _lineage_gen_dirs(prev_eval_path, parent_genid)
     non_lineage_prune_cmds = _non_lineage_prune_cmds(
         prev_eval_path, container_prev_eval_path, lineage_gen_dirs
@@ -308,8 +327,12 @@ def _non_lineage_prune_cmds(prev_eval_path, container_prev_eval_path, lineage_ge
 
 
 def _read_parent_genid(output_dir, genid):
-    metadata_file = os.path.join(output_dir, f"gen_{genid}", "metadata.json")
-    if not os.path.exists(metadata_file):
+    candidates = [
+        os.path.join(output_dir, f"gen_{genid}", "metadata.json"),
+        os.path.join(os.path.dirname(output_dir), "gens", f"gen_{genid}", "metadata.json"),
+    ]
+    metadata_file = next((p for p in candidates if os.path.exists(p)), None)
+    if metadata_file is None:
         return None
     with open(metadata_file, "r") as f:
         metadata = json.load(f)
