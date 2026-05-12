@@ -14,7 +14,7 @@ class TaskAgent(AgentSystem):
         self.reasoning_effort = reasoning_effort
         self.budget_status_path = budget_status_path
 
-    MAX_PARSE_RETRIES = 3
+    MAX_PARSE_RETRIES = 1
 
     def forward(self, inputs):
         """
