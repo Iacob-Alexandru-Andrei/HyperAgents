@@ -121,6 +121,7 @@ def build_container(
     verbose=True,
     cost_proxy_enabled=None,
     cost_proxy_network=None,
+    cost_proxy_upstream_hostnames=None,
     budget_status_path=None,
 ):
     """
@@ -309,6 +310,7 @@ def build_container(
             run_kwargs,
             enabled=cost_proxy_enabled,
             network_name=cost_proxy_network,
+            upstream_hostnames=cost_proxy_upstream_hostnames,
             verbose=verbose,
         )
 
@@ -750,14 +752,26 @@ def _apply_cost_proxy_network_lockdown(
     *,
     enabled=None,
     network_name=None,
+    upstream_hostnames=None,
     verbose=True,
 ):
-    """F2j (recursive-scientist deviation): attach container to the cost-proxy
+    """F2j / F2o (recursive-scientist deviation): attach container to the cost-proxy
     internal bridge and point ``extra_hosts.proxy`` at the **bridge gateway IP**
     (the host's interface on the bridge), NOT the host's external IP.
 
     ``internal=True`` bridges have no route to the host's external IP — only the
     bridge gateway (e.g. ``172.18.0.1``) is reachable from attached containers.
+
+    F2o (proxy mandatory + DNS root-cause fix): when ``upstream_hostnames`` is
+    provided, EACH upstream hostname (e.g. ``inference-api.nvidia.com``) is
+    ALSO mapped to the bridge gateway in ``extra_hosts``. This is
+    defense-in-depth for the catalog rewrite + meta-agent ``--model`` rewrite:
+    even if a future code path forgets to swap ``@<url>`` for the proxy
+    base URL, the in-container DNS still resolves the public hostname to
+    the gateway. The connect on port 443 then fails fast with "connection
+    refused" instead of hanging on a 30 s DNS timeout. The proxy itself
+    listens on a non-443 port, so this is purely a fail-fast safety net,
+    not an authorization bypass.
     """
     if not enabled:
         return
@@ -783,10 +797,13 @@ def _apply_cost_proxy_network_lockdown(
     run_kwargs["network"] = network_name
     extra_hosts = dict(run_kwargs.get("extra_hosts") or {})
     extra_hosts["proxy"] = gateway_ip
+    for hostname in upstream_hostnames or ():
+        if hostname and hostname != "proxy":
+            extra_hosts[hostname] = gateway_ip
     run_kwargs["extra_hosts"] = extra_hosts
     safe_log(
         f"Cost-proxy lockdown active: network={network_name} "
-        f"extra_hosts.proxy={gateway_ip} (bridge gateway)",
+        f"extra_hosts={dict(extra_hosts)} (bridge gateway {gateway_ip})",
         verbose=verbose,
     )
 

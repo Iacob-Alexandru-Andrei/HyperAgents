@@ -49,6 +49,46 @@ def _container_budget_status_path(budget_status_path):
     )
 
 
+def _rewrite_model_for_proxy(model, cost_proxy_base_url):
+    """F2o (recursive-scientist deviation): rewrite a model string's ``@<url>``
+    suffix to point at the cost proxy instead of the public upstream.
+
+    The catalog (``model_catalog.json``) is rewritten by the host's
+    ``rewrite_catalog_for_proxy`` before the container reads it, but the
+    meta-agent / task-agent CLIs receive ``--model`` as a separate
+    argument that historically carried the raw upstream URL. Containers
+    attached to the cost-proxy ``internal=True`` bridge cannot DNS-resolve
+    the public hostname, so an un-rewritten ``--model`` arg used to hang
+    on connect.
+
+    This helper is the host-side rewrite for that path. ``cost_proxy_base_url``
+    is the bridge-internal URL (e.g. ``http://proxy:9100/v1``); model
+    strings without an ``@<url>`` suffix pass through unchanged.
+    """
+    if not cost_proxy_base_url or not model or "@" not in model:
+        return model
+    head, sep, _suffix = model.partition("@")
+    if not sep:
+        return model
+    return f"{head}@{cost_proxy_base_url}"
+
+
+def _upstream_hostname_from_model(model):
+    """Extract the upstream hostname (e.g. ``inference-api.nvidia.com``) from
+    a model string with an ``@<base_url>`` suffix. Returns ``None`` when the
+    model has no suffix or the suffix is unparseable.
+    """
+    if not model or "@" not in model:
+        return None
+    _head, _sep, suffix = model.partition("@")
+    if not suffix:
+        return None
+    from urllib.parse import urlparse
+
+    parsed = urlparse(suffix)
+    return parsed.hostname or None
+
+
 def _snapshot_train_lineage_in_container(
     container,
     current_genid,
@@ -297,8 +337,17 @@ def run_generation_step(
     splits=None,
     cost_proxy_enabled=None,
     cost_proxy_network=None,
+    cost_proxy_base_url=None,
     budget_status_path=None,
+    produce_patch=True,
 ):
+    """``produce_patch=True`` is the canonical generator pass (train): it
+    runs F2l snapshot + ``git diff`` and writes ``model_patch.diff``.
+    ``produce_patch=False`` is a measurement pass (val/test/cross-eval):
+    it applies the gen's full patch chain, runs eval, but does NOT touch
+    the canonical ``model_patch.diff``. Mixing the two on the same gen
+    used to corrupt the patch into MODIFY-style hunks that fail when
+    later replayed against a fresh root_commit checkout."""
     # Per-role model routing: the legacy ``model`` keyword is the uniform
     # fallback (still required by the polyglot harness path). ``meta_agent_model``
     # overrides the meta-agent invocation only; ``task_agent_models`` is a
@@ -324,6 +373,35 @@ def run_generation_step(
         else reasoning_effort
     )
     _task_agent_reasoning_efforts = dict(task_agent_reasoning_efforts or {})
+    # F2o (recursive-scientist deviation): when the cost proxy is enabled,
+    # rewrite every ``--model`` arg's ``@<url>`` suffix to point at the
+    # bridge-internal proxy URL (``http://proxy:<port>/v1``). The catalog
+    # is rewritten separately by ``rewrite_catalog_for_proxy``; the CLI
+    # ``--model`` args are an independent channel that used to leak the
+    # raw upstream URL and trigger a DNS-resolution hang inside the
+    # ``internal=True`` cost-proxy bridge.
+    cost_proxy_upstream_hostnames = ()
+    if cost_proxy_enabled and cost_proxy_base_url:
+        # Collect upstream hostnames BEFORE rewriting so the lockdown can
+        # also map them to the bridge gateway as a fail-fast safety net.
+        upstream_hostnames = set()
+        for source in (
+            (model,) if model is not None else (),
+            (meta_agent_model,) if meta_agent_model is not None else (),
+            tuple(_task_agent_models.values()),
+        ):
+            for m in source:
+                hostname = _upstream_hostname_from_model(m)
+                if hostname:
+                    upstream_hostnames.add(hostname)
+        cost_proxy_upstream_hostnames = tuple(sorted(upstream_hostnames))
+        if model is not None:
+            model = _rewrite_model_for_proxy(model, cost_proxy_base_url)
+        meta_agent_model = _rewrite_model_for_proxy(meta_agent_model, cost_proxy_base_url)
+        _task_agent_models = {
+            d: _rewrite_model_for_proxy(m, cost_proxy_base_url)
+            for d, m in _task_agent_models.items()
+        }
     # Setup local output folder
     prev_gen_dir = os.path.join(output_dir, f"gen_{parent_genid}")
     gen_output_dir = os.path.join(output_dir, f"gen_{current_genid}")
@@ -352,6 +430,7 @@ def run_generation_step(
         domains=domains,
         cost_proxy_enabled=cost_proxy_enabled,
         cost_proxy_network=cost_proxy_network,
+        cost_proxy_upstream_hostnames=cost_proxy_upstream_hostnames,
         budget_status_path=budget_status_path,
     )
     container.start()
@@ -363,11 +442,37 @@ def run_generation_step(
         if is_starting_node(current_genid):
             meta_patch_files = meta_patch_files or []
             commit_hash = apply_diffs_container(container, meta_patch_files)
-            metadata["prev_patch_files"] += meta_patch_files
+            if produce_patch:
+                metadata["prev_patch_files"] += meta_patch_files
 
         # Apply all lineage diffs
         patch_files = get_patch_files(output_dir, parent_genid) if parent_patch_files is None else parent_patch_files
-        metadata["prev_patch_files"] += patch_files
+        # Measurement passes (``produce_patch=False``) apply patches to set
+        # up the workspace state but must NOT mutate the canonical
+        # ``prev_patch_files`` for the gen -- the train pass already
+        # recorded the chain, and overwriting it here would put the
+        # gen's own patch into ``prev_patch_files`` and create
+        # duplicate entries that break later ``patch -p1`` replay.
+        #
+        # For producer passes (train), the host passes ``parent_patch_files``
+        # = ``get_patch_files(node.id) = prev + curr`` from the prior
+        # meta-agent step. ``curr`` at that point already contains the
+        # gen's OWN patch path. We must apply the full chain to set up
+        # the workspace (parent lineage + self's code edits) but should
+        # NOT record self's patch in ``prev_patch_files`` -- self belongs
+        # in ``curr`` and adding it to prev double-counts. Without this
+        # dedupe, downstream consumers see ``prev + curr = [parent, self, self]``
+        # and the second ``patch -p1`` of self fails with
+        # "file already exists" (the first apply already created the
+        # lineage subtree).
+        self_patch_path = os.path.normpath(
+            os.path.join(gen_output_dir, "agent_output", "model_patch.diff")
+        )
+        if produce_patch:
+            parent_chain_only = [
+                p for p in patch_files if os.path.normpath(p) != self_patch_path
+            ]
+            metadata["prev_patch_files"] += parent_chain_only
         commit_hash = apply_diffs_container(container, patch_files)
 
         # F2l Phase 3 (recursive-scientist deviation): define agent_output
@@ -534,93 +639,71 @@ def run_generation_step(
                         raise
                 metadata["run_full_eval"] = True
 
-            # F2l (recursive-scientist deviation): snapshot train-eval
-            # outputs, agent_output/, and a metadata.json stub into
-            # ``/<REPO_NAME>/lineage/gen_<id>/`` and rewrite
-            # model_patch.diff so it carries code + lineage as one
-            # patch. Child containers that ``patch -p1`` this richer
-            # patch get the full parent state in their working tree
-            # without any host-side tar-of-output_dir.
-            #
-            # Phase 3: this is now the LOAD-BEARING path.
-            # ``copy_prev_eval_to_container`` has been deleted; the
-            # meta-agent's eval_path points at
-            # ``/<REPO_NAME>/lineage/`` and reads ancestor data from
-            # the per-gen subdirs delivered via patches.
-            #
-            # On failure of the snapshot itself we log + suppress (it
-            # is best-effort) but production flow continues — the host
-            # already has the train/val outcomes from the eval block
-            # above; what we lose is the child's view of this parent.
-            try:
-                _snapshot_train_lineage_in_container(
-                    container,
-                    current_genid=current_genid,
-                    base_commit=commit_hash,
-                    metadata=metadata,
-                    verbose=False,
-                )
-                # Preserve the existing (pre-eval, code-only) patch under
-                # ``code_only_patch.diff`` for analysis before we
-                # overwrite the canonical ``model_patch.diff`` with the
-                # richer code+lineage diff. The original was already
-                # copied to the host by the earlier ``copy_from_container``
-                # call above (line ~548-553), so this is a host-side
-                # rename.
-                existing_model_patch = os.path.join(
-                    local_agentoutput_folder, "model_patch.diff"
-                )
-                code_only_path = os.path.join(
-                    local_agentoutput_folder, "code_only_patch.diff"
-                )
-                if os.path.exists(existing_model_patch) and not os.path.exists(
-                    code_only_path
-                ):
-                    shutil.copy(existing_model_patch, code_only_path)
-                # Emit the richer model_patch.diff INSIDE the container,
-                # then copy it back over the host's existing file.
-                # ``--binary`` so any non-text harness artifact still
-                # round-trips through patch -p1. ``--no-color`` to keep
-                # the output script-safe.
-                in_container_patch = (
-                    f"{container_agentoutput_folder}/model_patch.diff"
-                )
-                cmd = (
-                    f"git diff --binary --no-color {shlex.quote(commit_hash)} "
-                    f"> {shlex.quote(in_container_patch)}"
-                )
-                exec_result = container.exec_run(
-                    cmd=["/bin/sh", "-c", cmd], workdir=f"/{REPO_NAME}"
-                )
-                log_container_output(exec_result, verbose=False)
-                if exec_result.exit_code != 0:
-                    raise RuntimeError(
-                        f"F2l git diff failed with exit {exec_result.exit_code}"
+            # F2l: snapshot lineage + emit the canonical model_patch.diff.
+            # Only fires on the TRAIN/generator pass (``produce_patch=True``).
+            # Val/test/cross-eval passes (``produce_patch=False``) skip this
+            # entire block so they cannot overwrite the gen's canonical
+            # patch with a post-apply-of-parents MODIFY-style diff that
+            # would later fail ``patch -p1`` against a fresh root_commit.
+            if produce_patch:
+                try:
+                    _snapshot_train_lineage_in_container(
+                        container,
+                        current_genid=current_genid,
+                        base_commit=commit_hash,
+                        metadata=metadata,
+                        verbose=False,
                     )
-                copy_from_container(
-                    container,
-                    source_path=in_container_patch,
-                    dest_path=existing_model_patch,
-                )
-            except Exception as lineage_exc:  # noqa: BLE001 -- F2l is additive
-                safe_log(
-                    f"F2l lineage snapshot skipped: {lineage_exc}",
-                    level=logging.WARNING,
-                )
+                    # Preserve the meta-agent's (pre-snapshot, code-only)
+                    # patch under ``code_only_patch.diff`` before the
+                    # canonical ``model_patch.diff`` is overwritten with
+                    # the richer code+lineage diff.
+                    existing_model_patch = os.path.join(
+                        local_agentoutput_folder, "model_patch.diff"
+                    )
+                    code_only_path = os.path.join(
+                        local_agentoutput_folder, "code_only_patch.diff"
+                    )
+                    if os.path.exists(existing_model_patch) and not os.path.exists(
+                        code_only_path
+                    ):
+                        shutil.copy(existing_model_patch, code_only_path)
+                    in_container_patch = (
+                        f"{container_agentoutput_folder}/model_patch.diff"
+                    )
+                    cmd = (
+                        f"git diff --binary --no-color {shlex.quote(commit_hash)} "
+                        f"> {shlex.quote(in_container_patch)}"
+                    )
+                    exec_result = container.exec_run(
+                        cmd=["/bin/sh", "-c", cmd], workdir=f"/{REPO_NAME}"
+                    )
+                    log_container_output(exec_result, verbose=False)
+                    if exec_result.exit_code != 0:
+                        raise RuntimeError(
+                            f"F2l git diff failed with exit {exec_result.exit_code}"
+                        )
+                    copy_from_container(
+                        container,
+                        source_path=in_container_patch,
+                        dest_path=existing_model_patch,
+                    )
+                except Exception as lineage_exc:  # noqa: BLE001 -- F2l is additive
+                    safe_log(
+                        f"F2l lineage snapshot skipped: {lineage_exc}",
+                        level=logging.WARNING,
+                    )
 
-            # F2l Phase 3: register the (possibly F2l-regenerated)
-            # ``model_patch.diff`` in ``curr_patch_files`` when it is
-            # genuinely present and non-empty. This is the canonical
-            # place for the bootstrap eval path (run_meta_agent=False)
-            # to publish its F2l-generated patch -- the meta-agent
-            # branch above already appended the path eagerly. Idempotent:
-            # we don't duplicate if the path is already in the list.
-            final_patch = os.path.join(local_agentoutput_folder, "model_patch.diff")
-            if (
-                file_exist_and_not_empty(final_patch)
-                and final_patch not in metadata["curr_patch_files"]
-            ):
-                metadata["curr_patch_files"].append(final_patch)
+                # Register the (possibly F2l-regenerated) ``model_patch.diff``
+                # in ``curr_patch_files`` when present and non-empty.
+                # Only on generator passes -- measurement passes must not
+                # mutate the patch chain.
+                final_patch = os.path.join(local_agentoutput_folder, "model_patch.diff")
+                if (
+                    file_exist_and_not_empty(final_patch)
+                    and final_patch not in metadata["curr_patch_files"]
+                ):
+                    metadata["curr_patch_files"].append(final_patch)
 
     except Exception as e:
         safe_log(f"Error in generate: {e}")
@@ -649,8 +732,16 @@ def run_generation_step(
             ]
         )
         metadata["valid_parent"] = metadata["run_eval"] and (eval_successful or meta_patch_files is not None)
-        with open(os.path.join(gen_output_dir, "metadata.json"), "w") as f:
-            json.dump(metadata, f, indent=4)
+        # Measurement passes (``produce_patch=False``) must not overwrite
+        # the gen's canonical metadata.json -- the train pass already
+        # wrote it with the authoritative ``prev_patch_files`` /
+        # ``curr_patch_files`` chain. A measurement pass that re-writes
+        # would clobber the chain (its local ``metadata`` dict starts
+        # fresh on entry to this function and only knows what was
+        # passed in, not what the train pass committed).
+        if produce_patch:
+            with open(os.path.join(gen_output_dir, "metadata.json"), "w") as f:
+                json.dump(metadata, f, indent=4)
 
     return metadata
 

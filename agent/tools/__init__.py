@@ -15,20 +15,15 @@ def _bind_current_gen(fn, current_gen):
 def load_tools(logging=print, names=[], catalog=None, workspace_root=None, current_gen=None):
     """Load every tool module under ``agent.tools``.
 
-    F-class: when ``catalog`` is provided, tool modules whose ``tool_info``
-    or ``tool_function`` declares a ``catalog`` parameter receive the catalog
+    When ``catalog`` is provided, tool modules whose ``tool_info`` or
+    ``tool_function`` declares a ``catalog`` parameter receive the catalog
     bound via ``functools.partial`` (function) or by direct keyword call
     (info). Tools without a ``catalog`` parameter (bash, edit) are unaffected.
 
-    F-class read-only tools (``read_file``, ``file_tree``, ``search``,
-    ``py_check``) declare a ``workspace_root`` parameter; when provided
-    here the workspace root is bound the same way as ``catalog`` so the
-    meta-agent's container path is fixed for the run.
-
-    ``current_gen`` is also host-injected for tools that declare it. The
-    argument is intentionally not exposed in tool schemas; if a model
-    includes it anyway, the wrapper discards that value and uses the
-    harness-provided value.
+    ``workspace_root`` and ``current_gen`` are bound the same way for any
+    tool that declares them. Neither is exposed in tool schemas; if a
+    model includes one anyway, the wrapper discards that value and uses
+    the harness-provided value.
 
     Modules whose filename begins with ``_`` are treated as private
     helpers (e.g. shared safety code) and skipped; this lets the tool
