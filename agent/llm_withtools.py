@@ -85,18 +85,18 @@ def _compression_ratio(budget_status_path):
 
 
 def _estimate_tokens(msg_history, input_msg, *, budget_status_path=None):
-    """Estimate the token count for ``msg_history + input_msg``.
+    """Estimate the token count of the next LLM call's prompt
+    (``msg_history + input_msg``) as ``total_chars / live_ratio``.
 
-    When the cost proxy has logged any usage, the in-flight estimate is
-    ``cumulative_prompt_tokens + (delta_chars / live_ratio)`` where
-    ``live_ratio = cumulative_chat_chars / cumulative_prompt_tokens``
-    floored at ``_COMPRESSION_RATIO_FLOOR``. The delta covers any
-    not-yet-logged fresh content (a freshly-appended tool result, the
-    current user message, etc.) by dividing its chars by the ratio.
+    ``live_ratio = cumulative_chat_chars / cumulative_prompt_tokens`` from
+    the proxy's lease-cumulative figures is a stable empirical
+    chars-per-token conversion factor. The cumulative *tokens* themselves
+    are NOT added: they are the sum of every prior call's prompt size on
+    this lease, not the in-flight context.
 
-    When the proxy has no observation yet (first call of the lease), we
-    fall back to ``chars / _COMPRESSION_RATIO_FALLBACK`` so the trigger
-    over-estimates and fires early rather than late.
+    Floored at ``_COMPRESSION_RATIO_FLOOR``. When the proxy has no
+    observation yet, fall back to ``chars / _COMPRESSION_RATIO_FALLBACK``
+    so the trigger over-estimates and fires early rather than late.
     """
     cum_prompt_tokens, cum_chat_chars = _read_proxy_status_tokens(budget_status_path)
     history_chars = sum(len(m.get("content", "")) for m in msg_history)
@@ -104,9 +104,7 @@ def _estimate_tokens(msg_history, input_msg, *, budget_status_path=None):
     total_chars = history_chars + input_chars
     if cum_prompt_tokens and cum_chat_chars:
         ratio = max(cum_chat_chars / cum_prompt_tokens, _COMPRESSION_RATIO_FLOOR)
-        delta_chars = max(0, total_chars - cum_chat_chars)
-        return int(cum_prompt_tokens + delta_chars / ratio)
-    # Pre-proxy fallback: conservative ratio so estimate overshoots.
+        return int(total_chars / ratio)
     return int(total_chars / _COMPRESSION_RATIO_FALLBACK)
 
 
