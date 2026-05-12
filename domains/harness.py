@@ -26,7 +26,16 @@ def get_dataset(domain, subset=""):
         df = pd.read_csv(f"./domains/{domain}/dataset{subset}.csv", dtype=str)
     return df
 
-def run_agent(TaskAgent, model, row, evals_folder, format_input_dict, question_id_col, reasoning_effort=None):
+def run_agent(
+    TaskAgent,
+    model,
+    row,
+    evals_folder,
+    format_input_dict,
+    question_id_col,
+    reasoning_effort=None,
+    budget_status_path=None,
+):
     question_id = row[question_id_col]
     chat_history_path = os.path.join(evals_folder, f"chat_history_{question_id}.md")
     # ``reasoning_effort`` is forwarded only when the TaskAgent constructor
@@ -34,9 +43,16 @@ def run_agent(TaskAgent, model, row, evals_folder, format_input_dict, question_i
     # third-party patched versions in the meta-agent's diff stream may not).
     agent_kwargs = {"model": model, "chat_history_file": chat_history_path}
     try:
-        agent = TaskAgent(**agent_kwargs, reasoning_effort=reasoning_effort)
+        agent = TaskAgent(
+            **agent_kwargs,
+            reasoning_effort=reasoning_effort,
+            budget_status_path=budget_status_path,
+        )
     except TypeError:
-        agent = TaskAgent(**agent_kwargs)
+        try:
+            agent = TaskAgent(**agent_kwargs, reasoning_effort=reasoning_effort)
+        except TypeError:
+            agent = TaskAgent(**agent_kwargs)
     inputs = format_input_dict(row)
     prediction, _ = agent.forward(inputs)
     return prediction
@@ -80,6 +96,7 @@ def harness(
     subset="",
     proofs_dname=None,
     reasoning_effort=None,
+    budget_status_path=None,
 ):
     # Dynamically import functions based on the domain
     utils_prefix = domain.split("_", 1)[1] + "_" if domain.startswith("imo_") else ""
@@ -148,9 +165,14 @@ def harness(
                     i,
                     executor.submit(
                         run_agent,
-                        TaskAgent, model, row, evals_folder,
-                        format_input_dict, question_id_col,
+                        TaskAgent,
+                        model,
+                        row,
+                        evals_folder,
+                        format_input_dict,
+                        question_id_col,
                         reasoning_effort,
+                        budget_status_path,
                     ),
                 )
             )
@@ -237,6 +259,12 @@ if __name__ == "__main__":
         choices=["low", "medium", "high"],
         help="OpenAI-style reasoning_effort forwarded into the TaskAgent",
     )
+    parser.add_argument(
+        "--budget_status_path",
+        type=str,
+        default=None,
+        help="Path to the live budget status markdown injected into every chat turn",
+    )
     args = parser.parse_args()
 
     domain = args.domain
@@ -264,6 +292,7 @@ if __name__ == "__main__":
             subset=args.subset,
             proofs_dname=args.proofs_dname,
             reasoning_effort=args.reasoning_effort,
+            budget_status_path=args.budget_status_path,
         )
 
     # Balrog game domains

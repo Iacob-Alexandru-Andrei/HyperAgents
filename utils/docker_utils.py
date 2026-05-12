@@ -1,6 +1,7 @@
 import io
 import logging
 import os
+import subprocess
 import tarfile
 import threading
 import warnings
@@ -12,6 +13,17 @@ from docker.models.containers import Container
 from docker.types import Mount
 
 from utils.constants import REPO_NAME
+
+BUDGET_STATUS_CONTAINER_DIR = "/rqgm_budget"
+
+
+def _budget_status_volume(budget_status_path):
+    if not budget_status_path:
+        return None
+    return (
+        os.path.abspath(os.path.dirname(budget_status_path) or "."),
+        BUDGET_STATUS_CONTAINER_DIR,
+    )
 
 warnings.filterwarnings(
     "ignore",
@@ -109,9 +121,8 @@ def build_container(
     verbose=True,
     cost_proxy_enabled=None,
     cost_proxy_network=None,
-    cost_proxy_health_url=None,
-    cost_proxy_deadline_ts=None,
-    cost_proxy_budget_usd=None,
+    cost_proxy_upstream_hostnames=None,
+    budget_status_path=None,
 ):
     """
     Build the Docker image with proxy and host networking, then run it interactively.
@@ -261,26 +272,14 @@ def build_container(
         # Run the container with host networking and volume mount.
         # For Podman, we need to pass GPU devices explicitly via security_opt or devices.
         #
-        # F2c+F2h+F2g+Tier3 environment propagation. ``OPENAI_API_KEY`` is
-        # the conventional secret-flow inheritance pattern. Recursive
-        # scientist passes cost-proxy settings explicitly so concurrent
-        # container launches do not race through process-global env; the
-        # legacy env fallback remains for direct upstream usage.
-        if cost_proxy_enabled is None:
-            cost_proxy_env = {
-                key: os.environ.get(key, "")
-                for key in (
-                    "RS_COST_PROXY_HEALTH_URL",
-                    "RS_EXPANSION_DEADLINE_TS",
-                    "RS_COST_PROXY_BUDGET_USD",
-                )
-            }
-        else:
-            cost_proxy_env = {
-                "RS_COST_PROXY_HEALTH_URL": cost_proxy_health_url or "",
-                "RS_EXPANSION_DEADLINE_TS": cost_proxy_deadline_ts or "",
-                "RS_COST_PROXY_BUDGET_USD": cost_proxy_budget_usd or "",
-            }
+        volumes = {
+            os.path.abspath(repo_path): {"bind": f"/{REPO_NAME}", "mode": "rw"}
+        }
+        budget_status_volume = _budget_status_volume(budget_status_path)
+        if budget_status_volume is not None:
+            host_dir, container_dir = budget_status_volume
+            volumes[host_dir] = {"bind": container_dir, "mode": "ro"}
+
         run_kwargs = {
             "image": image_name,
             "name": container_name,
@@ -288,9 +287,7 @@ def build_container(
             "tty": True,
             "stdin_open": True,
             "network_mode": "host",
-            "volumes": {
-                os.path.abspath(repo_path): {"bind": f"/{REPO_NAME}", "mode": "rw"}
-            },
+            "volumes": volumes,
             "environment": {
                 # F2i (recursive-scientist deviation): alias ``NVIDIA_API_KEY``
                 # to ``OPENAI_API_KEY`` here so the host's ``experiments/run.py``
@@ -301,7 +298,6 @@ def build_container(
                 # container's environment dict only.
                 "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY")
                 or os.environ.get("NVIDIA_API_KEY", ""),
-                **cost_proxy_env,
             },
             "command": "tail -f /dev/null",
         }
@@ -314,6 +310,7 @@ def build_container(
             run_kwargs,
             enabled=cost_proxy_enabled,
             network_name=cost_proxy_network,
+            upstream_hostnames=cost_proxy_upstream_hostnames,
             verbose=verbose,
         )
 
@@ -329,17 +326,22 @@ def build_container(
 
                 # Build the podman run command with CDI GPU support
                 # Podman 5.x uses CDI (Container Device Interface) instead of --gpus
-                import subprocess
-
-                volume_mount = f"{os.path.abspath(repo_path)}:/{REPO_NAME}:rw"
-                cmd = [
-                    "podman",
-                    "run",
-                    "-d",  # detach
-                    "-it",  # interactive + tty
-                    "--network=host",
-                    "-v",
-                    volume_mount,
+                volume_mounts = [f"{os.path.abspath(repo_path)}:/{REPO_NAME}:rw"]
+                if budget_status_volume is not None:
+                    host_dir, container_dir = budget_status_volume
+                    volume_mounts.append(f"{host_dir}:{container_dir}:ro")
+                cmd = ["podman", "run", "-d", "-it"]
+                if "network" in run_kwargs:
+                    cmd += ["--network", str(run_kwargs["network"])]
+                else:
+                    cmd.append(f"--network={run_kwargs.get('network_mode', 'host')}")
+                for host, ip in dict(run_kwargs.get("extra_hosts") or {}).items():
+                    cmd += ["--add-host", f"{host}:{ip}"]
+                for volume_mount in volume_mounts:
+                    cmd += ["-v", volume_mount]
+                for key, value in dict(run_kwargs.get("environment") or {}).items():
+                    cmd += ["-e", f"{key}={value}"]
+                cmd += [
                     "--device",
                     "nvidia.com/gpu=all",  # CDI format for Podman 5.x
                     # Add environment variables for NVIDIA libraries
@@ -750,25 +752,31 @@ def _apply_cost_proxy_network_lockdown(
     *,
     enabled=None,
     network_name=None,
+    upstream_hostnames=None,
     verbose=True,
 ):
-    """F2j (recursive-scientist deviation): attach container to the cost-proxy
+    """F2j / F2o (recursive-scientist deviation): attach container to the cost-proxy
     internal bridge and point ``extra_hosts.proxy`` at the **bridge gateway IP**
     (the host's interface on the bridge), NOT the host's external IP.
 
     ``internal=True`` bridges have no route to the host's external IP — only the
     bridge gateway (e.g. ``172.18.0.1``) is reachable from attached containers.
-    Direct callers can still enable this through the legacy
-    ``RS_COST_PROXY_HOST_IP`` sentinel; recursive-scientist passes
-    ``enabled`` explicitly to avoid process-global env races.
+
+    F2o (proxy mandatory + DNS root-cause fix): when ``upstream_hostnames`` is
+    provided, EACH upstream hostname (e.g. ``inference-api.nvidia.com``) is
+    ALSO mapped to the bridge gateway in ``extra_hosts``. This is
+    defense-in-depth for the catalog rewrite + meta-agent ``--model`` rewrite:
+    even if a future code path forgets to swap ``@<url>`` for the proxy
+    base URL, the in-container DNS still resolves the public hostname to
+    the gateway. The connect on port 443 then fails fast with "connection
+    refused" instead of hanging on a 30 s DNS timeout. The proxy itself
+    listens on a non-443 port, so this is purely a fail-fast safety net,
+    not an authorization bypass.
     """
-    env_enabled = os.environ.get("RS_COST_PROXY_HOST_IP")
-    if enabled is None:
-        enabled = bool(env_enabled)
     if not enabled:
         return
     if network_name is None:
-        network_name = os.environ.get("RS_COST_PROXY_NETWORK", _DEFAULT_COST_PROXY_NETWORK)
+        network_name = _DEFAULT_COST_PROXY_NETWORK
     _ensure_cost_proxy_network(client, network_name, verbose=verbose)
     # Discover the bridge gateway IP after the network exists.
     network = client.networks.get(network_name)
@@ -789,10 +797,13 @@ def _apply_cost_proxy_network_lockdown(
     run_kwargs["network"] = network_name
     extra_hosts = dict(run_kwargs.get("extra_hosts") or {})
     extra_hosts["proxy"] = gateway_ip
+    for hostname in upstream_hostnames or ():
+        if hostname and hostname != "proxy":
+            extra_hosts[hostname] = gateway_ip
     run_kwargs["extra_hosts"] = extra_hosts
     safe_log(
         f"Cost-proxy lockdown active: network={network_name} "
-        f"extra_hosts.proxy={gateway_ip} (bridge gateway)",
+        f"extra_hosts={dict(extra_hosts)} (bridge gateway {gateway_ip})",
         verbose=verbose,
     )
 

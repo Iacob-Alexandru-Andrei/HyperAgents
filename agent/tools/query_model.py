@@ -31,7 +31,7 @@ def _resolve(catalog, chosen_id, chosen_effort):
             f"reasoning_effort {chosen_effort!r} not allowed for {chosen_id!r}; "
             f"allowed: {sorted(allowed)}"
         )
-    return entry["model"], chosen_effort
+    return entry, entry["model"], chosen_effort
 
 
 def tool_info(*, catalog=None):
@@ -82,7 +82,9 @@ def tool_function(prompt, id, effort=None, max_tokens=4096, *, catalog=None):
     catalog = list(catalog or [])
     if not catalog:
         raise ValueError("query_model is disabled: no model_catalog configured.")
-    model_str, eff = _resolve(catalog, id, effort)
+    entry, model_str, eff = _resolve(catalog, id, effort)
+    cap = int(entry.get("max_output_tokens") or 4096)
+    bounded_max_tokens = min(max(1, int(max_tokens)), cap)
     from agent.llm import get_response_from_llm
 
     response, _, _ = get_response_from_llm(
@@ -90,6 +92,6 @@ def tool_function(prompt, id, effort=None, max_tokens=4096, *, catalog=None):
         model=model_str,
         msg_history=[],
         reasoning_effort=eff,
-        max_tokens=max_tokens,
+        max_tokens=bounded_max_tokens,
     )
     return response

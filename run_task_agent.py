@@ -22,6 +22,12 @@ def main():
         choices=['low', 'medium', 'high'],
         help='OpenAI-style reasoning_effort applied to every task-agent LLM call',
     )
+    parser.add_argument(
+        '--budget_status_path',
+        type=str,
+        default=None,
+        help='Path to the live budget status markdown injected into every chat turn',
+    )
     args = parser.parse_args()
 
     # Process the repository
@@ -29,6 +35,7 @@ def main():
         model=args.model,
         chat_history_file=args.chat_history_file,
         reasoning_effort=args.reasoning_effort,
+        budget_status_path=args.budget_status_path,
     )
     inputs = {
         "domain": "polyglot",

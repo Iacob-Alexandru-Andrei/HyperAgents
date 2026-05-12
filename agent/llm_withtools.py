@@ -1,76 +1,303 @@
 import json
 import os
 import re
-import time
-import urllib.error
-import urllib.request
 
 from agent.llm import get_response_from_llm
 from agent.tools import load_tools
 
-# F2h (recursive-scientist Tier 3 per-turn cost visibility): when the
-# host has spawned a per-expansion cost-proxy and a wall-clock cap, two
-# env vars surface the live source and the deadline so the meta-agent
-# can self-regulate before the proxy's 402 hard-cap fires:
-#
-#   RS_COST_PROXY_HEALTH_URL  HTTP GET that returns
-#                             {"calls", "cumulative_cost_usd",
-#                              "budget_usd", ...}.
-#   RS_EXPANSION_DEADLINE_TS  Unix timestamp at which the in-container
-#                             wall-clock kill fires.
-#
-# Either env var absent => the corresponding fragment is omitted; both
-# absent => the prefix is empty and behavior matches the pre-Tier-3
-# default. The HTTP probe is wrapped in a tight timeout so a stalled
-# proxy does not deadlock the meta-agent.
-_HEALTH_URL_ENV = "RS_COST_PROXY_HEALTH_URL"
-_DEADLINE_ENV = "RS_EXPANSION_DEADLINE_TS"
-_HEALTH_PROBE_TIMEOUT_SEC = 1.0
+# F2o (recursive-scientist deviation): the cost proxy writes a JSON
+# status file alongside the markdown one (``status.latest.json``). The
+# JSON carries ``cumulative_prompt_tokens`` and ``cumulative_chat_chars``
+# which the compaction trigger reads to derive a live bytes-per-token
+# compression ratio. The two files are siblings of ``status.md``; the
+# host mounts the entire ``budget_dir`` at ``BUDGET_STATUS_CONTAINER_DIR``
+# so this side-band lookup is just a sibling filename read.
+_PROXY_STATUS_JSON_BASENAME = "status.latest.json"
+# Conservative bytes-per-token fallback used before the proxy has logged
+# any usage. 3.0 over-estimates (more bytes per token than reality for
+# Nemotron's reasoning-heavy turns, where the live ratio settles around
+# 3.0-3.5) so compaction errs on the side of firing early rather than
+# late. ``chars / 3.0`` overshoots; ``chars / 4.0`` (the legacy default)
+# undershoots and triggered the May 11-12 late-compaction incident.
+_COMPRESSION_RATIO_FALLBACK = 3.0
+# Hard floor below which we never trust the live ratio. A transient
+# under-report of ``cumulative_chat_chars`` (e.g. a first response that
+# got streamed before its tokens were logged) could otherwise push the
+# ratio toward 1.0 and make the compactor think the model is suddenly
+# 1-byte-per-token, which would never fire.
+_COMPRESSION_RATIO_FLOOR = 2.0
 
 
-def _budget_line():
-    """Return the per-turn budget prefix or an empty string.
+_COMPACTION_SUMMARY_PROMPT = (
+    "You are compressing your own reasoning history to free up context.\n"
+    "Below are the turns of a meta-agent (your prior self) working on a "
+    "code-improvement task. Produce a single dense summary preserving "
+    "ONLY the facts a continuation would need:\n\n"
+    "1. Files you read and their relevant contents (filename + 1-3 line summary each).\n"
+    "2. Hypotheses you formed and tested, with outcomes.\n"
+    "3. Code changes you attempted: diff intent, what they did, what worked.\n"
+    "4. Things you ruled out, with reasons.\n"
+    "5. The current plan / next-step intent.\n\n"
+    "Format: terse bulleted markdown, <=2000 tokens. No preamble, no "
+    "\"In summary...\" chatter. Start directly with the facts.\n\n"
+    "<HISTORY>\n{history}\n</HISTORY>"
+)
 
-    Format::
 
-        Remaining budget: $X (of $Y). Remaining wall-clock: T seconds (of B).
-        Catalog cost-per-1M-tokens for each model is in MODEL_CATALOG.md.
+def _read_proxy_status_tokens(budget_status_path):
+    """Read ``(cumulative_prompt_tokens, cumulative_chat_chars)`` from the
+    proxy's JSON status file (sibling of ``status.md``).
 
-    Either fragment is dropped when its env var is unset; if both are
-    unset the line itself is omitted (empty string), keeping pre-Tier-3
-    behavior identical.
+    Returns ``(None, None)`` when:
+      - ``budget_status_path`` is unset,
+      - the sibling JSON file does not exist (first call before the proxy
+        has logged any usage),
+      - the JSON is empty or malformed,
+      - the required fields are absent (older proxy versions before the
+        F2o schema bump).
+    A return of ``(0, 0)`` is distinguishable from ``(None, None)``:
+    ``(0, 0)`` means the proxy is up but no chat completion has been
+    intercepted yet (e.g. between leases); ``(None, None)`` means we have
+    no observation at all and the caller should use the conservative
+    fallback ratio.
     """
-    health_url = os.environ.get(_HEALTH_URL_ENV)
-    deadline_ts = os.environ.get(_DEADLINE_ENV)
-    parts = []
-    if health_url:
-        try:
-            with urllib.request.urlopen(health_url, timeout=_HEALTH_PROBE_TIMEOUT_SEC) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, ValueError):
-            payload = None
-        if isinstance(payload, dict):
-            cap = payload.get("budget_usd")
-            cum = payload.get("cumulative_cost_usd")
-            if cap is not None and cum is not None:
-                remaining = max(0.0, float(cap) - float(cum))
-                parts.append(
-                    f"Remaining budget: ${remaining:.2f} (of ${float(cap):.2f})."
-                )
-    if deadline_ts:
-        try:
-            deadline = float(deadline_ts)
-            now = time.time()
-            remaining_sec = int(max(0.0, deadline - now))
-            parts.append(f"Remaining wall-clock: {remaining_sec} seconds.")
-        except ValueError:
-            pass
-    if not parts:
-        return ""
-    return (
-        " ".join(parts)
-        + " Catalog cost-per-1M-tokens for each model is in MODEL_CATALOG.md.\n\n"
+    if not budget_status_path:
+        return None, None
+    json_path = os.path.join(
+        os.path.dirname(budget_status_path) or ".",
+        _PROXY_STATUS_JSON_BASENAME,
     )
+    try:
+        with open(json_path) as fp:
+            payload = json.load(fp)
+    except (OSError, ValueError):
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    prompt_tokens = payload.get("cumulative_prompt_tokens")
+    chat_chars = payload.get("cumulative_chat_chars")
+    if not isinstance(prompt_tokens, int) or not isinstance(chat_chars, int):
+        return None, None
+    return prompt_tokens, chat_chars
+
+
+def _compression_ratio(budget_status_path):
+    """Return a live ``chars / token`` ratio from the proxy's status file,
+    or the conservative fallback when no observation is available.
+
+    The ratio is floored at ``_COMPRESSION_RATIO_FLOOR`` so a transient
+    under-report cannot make the compactor under-estimate token cost.
+    """
+    cum_prompt_tokens, cum_chat_chars = _read_proxy_status_tokens(budget_status_path)
+    if (
+        cum_prompt_tokens is None
+        or cum_chat_chars is None
+        or cum_prompt_tokens <= 0
+        or cum_chat_chars <= 0
+    ):
+        return _COMPRESSION_RATIO_FALLBACK
+    return max(cum_chat_chars / cum_prompt_tokens, _COMPRESSION_RATIO_FLOOR)
+
+
+def _estimate_tokens(msg_history, input_msg, *, budget_status_path=None):
+    """Estimate the token count for ``msg_history + input_msg``.
+
+    When the cost proxy has logged any usage, the in-flight estimate is
+    ``cumulative_prompt_tokens + (delta_chars / live_ratio)`` where
+    ``live_ratio = cumulative_chat_chars / cumulative_prompt_tokens``
+    floored at ``_COMPRESSION_RATIO_FLOOR``. The delta covers any
+    not-yet-logged fresh content (a freshly-appended tool result, the
+    current user message, etc.) by dividing its chars by the ratio.
+
+    When the proxy has no observation yet (first call of the lease), we
+    fall back to ``chars / _COMPRESSION_RATIO_FALLBACK`` so the trigger
+    over-estimates and fires early rather than late.
+    """
+    cum_prompt_tokens, cum_chat_chars = _read_proxy_status_tokens(budget_status_path)
+    history_chars = sum(len(m.get("content", "")) for m in msg_history)
+    input_chars = len(input_msg or "")
+    total_chars = history_chars + input_chars
+    if cum_prompt_tokens and cum_chat_chars:
+        ratio = max(cum_chat_chars / cum_prompt_tokens, _COMPRESSION_RATIO_FLOOR)
+        delta_chars = max(0, total_chars - cum_chat_chars)
+        return int(cum_prompt_tokens + delta_chars / ratio)
+    # Pre-proxy fallback: conservative ratio so estimate overshoots.
+    return int(total_chars / _COMPRESSION_RATIO_FALLBACK)
+
+
+def _resolve_compaction_config(catalog, model):
+    """Return (enabled, soft_cap, summary_max_tok) for the active model.
+
+    Soft cap is derived from the catalog entry (context_window_tokens,
+    max_output_tokens) when available; falls back to 128000/4096 to
+    match the Nemotron defaults documented in the project YAMLs. Env
+    overrides apply on top.
+    """
+    enabled = os.environ.get("HYPERAGENTS_COMPACTION_ENABLED", "1") != "0"
+    soft_fraction = float(
+        os.environ.get("HYPERAGENTS_COMPACTION_SOFT_FRACTION", "0.85")
+    )
+    summary_max_tok = int(
+        os.environ.get("HYPERAGENTS_COMPACTION_SUMMARY_MAX_TOK", "2500")
+    )
+    safety_margin_tok = int(
+        os.environ.get("HYPERAGENTS_COMPACTION_SAFETY_MARGIN_TOK", "4000")
+    )
+
+    entry = None
+    for e in catalog or []:
+        if not isinstance(e, dict):
+            continue
+        if e.get("model") == model or e.get("id") == model:
+            entry = e
+            break
+    context_window = int((entry or {}).get("context_window_tokens", 128000))
+    max_output = int((entry or {}).get("max_output_tokens", 4096))
+    soft_cap = int((context_window - max_output - safety_margin_tok) * soft_fraction)
+    return enabled, soft_cap, summary_max_tok
+
+
+def _is_tool_result_message(message):
+    """Last-msg-is-tool-result probe: starts with `<json>` and contains `tool_output`."""
+    if not isinstance(message, dict):
+        return False
+    content = message.get("content", "")
+    return isinstance(content, str) and content.lstrip().startswith("<json>") and (
+        "tool_output" in content
+    )
+
+
+def _truncate_to_tokens(text, max_tokens):
+    """Trim ``text`` to ~max_tokens via the char/4 heuristic, suffixing an ellipsis."""
+    max_chars = max_tokens * 4
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 1)] + "…"
+
+
+def _maybe_compact_history(
+    msg_history,
+    input_msg,
+    *,
+    model,
+    catalog,
+    reasoning_effort,
+    logging,
+    summarize_fn=None,
+    budget_status_path=None,
+):
+    """Compact ``msg_history`` in place when the estimated token count exceeds
+    the model's soft cap. Returns the (possibly new) msg_history list.
+
+    Algorithm (per the LLM-summarization context-compaction contract):
+
+    - Estimate ``est_tokens`` = ``_estimate_tokens(msg_history, input_msg,
+      budget_status_path=budget_status_path)`` -- proxy-derived live
+      ratio when available, conservative ``chars/3`` fallback otherwise.
+    - If under ``soft_cap`` or compaction disabled, return as-is.
+    - Keep ``msg_history[0]`` (initial user message) verbatim.
+    - Keep ``msg_history[-1]`` IF it looks like a tool result.
+    - Fire ONE summarization call to the same model with an empty
+      ``msg_history`` to compress the span between them.
+    - Replace the span with a single ``role=assistant`` message wrapping
+      ``<COMPACTED HISTORY>``.
+    - If post-compaction the estimate still exceeds the soft cap (e.g. a
+      single tool result is itself huge), raise ``RuntimeError``.
+    - If the summarization call raises, log and fall through with the
+      original history.
+
+    The compaction message role MUST be ``"assistant"``. Compaction events
+    are surfaced through the chat history (which run-observability layer
+    15 watches) by virtue of the ``<COMPACTED HISTORY>`` marker landing in
+    the persisted transcript on the very next ``get_response_from_llm``
+    call.
+    """
+    enabled, soft_cap, summary_max_tok = _resolve_compaction_config(catalog, model)
+    if not enabled:
+        return msg_history
+    if not msg_history:
+        return msg_history
+
+    est_tokens = _estimate_tokens(
+        msg_history, input_msg, budget_status_path=budget_status_path
+    )
+    if est_tokens <= soft_cap:
+        return msg_history
+
+    if len(msg_history) < 2:
+        # Only the initial user message present; nothing to summarize.
+        return msg_history
+
+    keep_tail = _is_tool_result_message(msg_history[-1]) and len(msg_history) >= 3
+    span = msg_history[1:-1] if keep_tail else msg_history[1:]
+    if not span:
+        return msg_history
+
+    history_blob = "\n\n".join(
+        m.get("content", "") for m in span if isinstance(m, dict)
+    )
+    summary_prompt = _COMPACTION_SUMMARY_PROMPT.format(history=history_blob)
+
+    call_fn = summarize_fn or get_response_from_llm
+    try:
+        logging(
+            f"COMPACTION: est_tokens={est_tokens} > soft_cap={soft_cap}; "
+            f"summarizing {len(span)} message(s) of span"
+        )
+        summary, _summary_history, _info = call_fn(
+            msg=summary_prompt,
+            model=model,
+            msg_history=[],
+            reasoning_effort=reasoning_effort,
+            max_tokens=summary_max_tok,
+        )
+    except Exception as exc:  # rate-limit, 5xx, summary-call overflow, etc.
+        logging(f"compaction failed: {exc}")
+        return msg_history
+
+    if not isinstance(summary, str):
+        summary = "" if summary is None else str(summary)
+    summary = _truncate_to_tokens(summary, summary_max_tok)
+    compacted = {
+        "role": "assistant",
+        "content": f"<COMPACTED HISTORY>\n{summary}\n</COMPACTED HISTORY>",
+    }
+
+    new_history = [msg_history[0], compacted]
+    if keep_tail:
+        new_history.append(msg_history[-1])
+
+    post_tokens = _estimate_tokens(
+        new_history, input_msg, budget_status_path=budget_status_path
+    )
+    if post_tokens > soft_cap:
+        raise RuntimeError(
+            "compaction insufficient: post-compaction estimate "
+            f"{post_tokens} tokens still exceeds soft_cap {soft_cap} "
+            "(likely a single retained message is itself larger than the cap)."
+        )
+    logging(
+        f"COMPACTION: compacted {len(span)} message(s) -> 1 summary "
+        f"(post_tokens={post_tokens}, soft_cap={soft_cap}); marker "
+        "<COMPACTED HISTORY> emitted."
+    )
+    return new_history
+
+
+def _budget_status_prefix(budget_status_path):
+    """Return the budget-status prefix to inject into the meta-agent prompt.
+
+    Returns ``""`` only when the path is unset or the file is empty. If
+    the host passes an explicit path, it must be readable from this
+    process's view; missing or unreadable paths are configuration errors.
+    """
+    if not budget_status_path:
+        return ""
+    with open(budget_status_path) as f:
+        text = f.read().strip()
+    if not text:
+        return ""
+    return text + "\n\n"
 
 def get_tooluse_prompt(tool_infos=[]):
     """
@@ -196,6 +423,9 @@ def chat_with_agent(
     max_tool_calls=40,  # Maximum number of tool calls allowed in a single response, -1 for unlimited
     reasoning_effort=None,
     catalog=None,  # F-class: model_catalog injected into tools that declare it (query_model).
+    budget_status_path=None,
+    workspace_root=None,
+    current_gen=None,
 ):
     get_response_fn = get_response_from_llm
     # Construct message
@@ -205,18 +435,31 @@ def chat_with_agent(
 
     try:
         # Load all tools
-        all_tools = load_tools(logging=logging, names=tools_available, catalog=catalog)
+        all_tools = load_tools(
+            logging=logging,
+            names=tools_available,
+            catalog=catalog,
+            workspace_root=workspace_root,
+            current_gen=current_gen,
+        )
         tools_dict = {tool['info']['name']: tool for tool in all_tools}
         system_msg = f"{get_tooluse_prompt([tool['info'] for tool in all_tools])}\n\n"
         num_tool_calls = 0
 
         # Call API
-        # F2h: prepend the per-turn budget line freshly each turn so the
-        # meta-agent always sees the LIVE remaining budget (the proxy's
-        # in-memory accumulator) and the LIVE remaining wall-clock.
-        logging(f"Input: {repr(msg)}")
+        input_msg = _budget_status_prefix(budget_status_path) + system_msg + msg
+        new_msg_history = _maybe_compact_history(
+            new_msg_history,
+            input_msg,
+            model=model,
+            catalog=catalog,
+            reasoning_effort=reasoning_effort,
+            logging=logging,
+            budget_status_path=budget_status_path,
+        )
+        logging(f"Input: {repr(input_msg)}")
         response, new_msg_history, info = get_response_fn(
-            msg=_budget_line() + system_msg + msg,
+            msg=input_msg,
             model=model,
             msg_history=new_msg_history,
             reasoning_effort=reasoning_effort,
@@ -277,9 +520,22 @@ def chat_with_agent(
                 tool_msgs.append(err_msg)
 
             # Get tool response
-            # F2h: prepend the per-turn budget line freshly each turn.
+            input_msg = (
+                _budget_status_prefix(budget_status_path)
+                + system_msg
+                + '\n\n'.join(tool_msgs)
+            )
+            new_msg_history = _maybe_compact_history(
+                new_msg_history,
+                input_msg,
+                model=model,
+                catalog=catalog,
+                reasoning_effort=reasoning_effort,
+                logging=logging,
+            )
+            logging(f"Input: {repr(input_msg)}")
             response, new_msg_history, info = get_response_fn(
-                msg=_budget_line() + system_msg + '\n\n'.join(tool_msgs),
+                msg=input_msg,
                 model=model,
                 msg_history=new_msg_history,
                 reasoning_effort=reasoning_effort,

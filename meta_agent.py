@@ -7,9 +7,16 @@ from agent.base_agent import AgentSystem
 from agent.llm_withtools import chat_with_agent
 
 class MetaAgent(AgentSystem):
-    def __init__(self, model, chat_history_file='./outputs/chat_history.md', reasoning_effort=None):
+    def __init__(
+        self,
+        model,
+        chat_history_file='./outputs/chat_history.md',
+        reasoning_effort=None,
+        budget_status_path=None,
+    ):
         super().__init__(model=model, chat_history_file=chat_history_file)
         self.reasoning_effort = reasoning_effort
+        self.budget_status_path = budget_status_path
 
     def forward(self, repo_path, eval_path, iterations_left=None):
         """
@@ -63,9 +70,16 @@ class MetaAgent(AgentSystem):
             "artifact: what was tried, what worked, what failed. Future "
             "generations will read YOUR chat history, so explain your "
             "reasoning clearly."
-            "\n  - `agent_output/model_patch.diff` -- the diff each "
-            "predecessor produced. Useful so you don't redo work and can "
-            "build on it."
+            "\n  - `agent_output/code_only_patch.diff` -- the code-only diff "
+            "each predecessor produced (just the source-file edits the "
+            "meta-agent made, no lineage data). Read this to see what "
+            "predecessors changed without wading through the F2l-rich "
+            "`model_patch.diff` (which also contains lineage snapshots: "
+            "predictions.csv, chat histories, etc. -- all of which you "
+            "already access directly under the per-ancestor "
+            "`<domain>_eval/` and `agent_output/` paths above). "
+            "`code_only_patch.diff` may be absent on the baseline "
+            "`gen_initial/` (no agent edits there)."
             "\n  - `metadata.json` -- parent_genid, parent_agent_success, "
             "lineage info."
             "\n\nCRITICAL: your utility is computed on a HELD-OUT validation "
@@ -82,13 +96,7 @@ class MetaAgent(AgentSystem):
             "\n\nEach `<domain>_eval/report.json` distinguishes `malformed_qids` (LLM "
             "output couldn't be parsed -> outcome=0 by convention; the agent failed to "
             "produce parseable output) from `question_ids_failed_real` (parsed but "
-            "wrong prediction). High `malformed_count` is an actionable signal: add "
-            "output-validation scaffolding to the relevant agent (wrap its "
-            "`chat_with_agent` call in a retry-with-corrective-prompt loop, tighten "
-            "the output schema in `task_agent.py:OUTPUT_FORMATS`, or use `query_model` "
-            "to sanity-check suspect outputs). Reducing malformations is a reliable "
-            "way to lift utility because each malformed row is currently a "
-            "guaranteed outcome=0."
+            "wrong prediction)."
         )
 
         new_msg_history = chat_with_agent(
@@ -99,4 +107,6 @@ class MetaAgent(AgentSystem):
             tools_available='all',
             reasoning_effort=self.reasoning_effort,
             catalog=catalog,
+            budget_status_path=self.budget_status_path,
+            workspace_root=repo_path,
         )

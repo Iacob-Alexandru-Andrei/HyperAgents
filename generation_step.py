@@ -6,7 +6,6 @@ import logging
 import os
 import shutil
 import shlex
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -18,7 +17,6 @@ from utils.docker_utils import (
     build_container,
     cleanup_container,
     copy_from_container,
-    copy_to_container,
     log_container_output,
     safe_log,
     setup_logger,
@@ -39,78 +37,106 @@ from utils.gl_utils import (
     process_meta_patch_files,
 )
 
+BUDGET_STATUS_CONTAINER_DIR = "/rqgm_budget"
 
-def _append_jsonl_file(src_path, dest_path):
-    if not os.path.exists(src_path):
-        return
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    fd = os.open(dest_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-    try:
-        import fcntl
 
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        try:
-            with open(src_path, "rb") as src:
-                for line in src:
-                    if not line.strip():
-                        continue
-                    view = memoryview(line if line.endswith(b"\n") else line + b"\n")
-                    while view:
-                        written = os.write(fd, view)
-                        if written <= 0:
-                            raise OSError(f"short write while appending {dest_path}")
-                        view = view[written:]
-            os.fsync(fd)
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
+def _container_budget_status_path(budget_status_path):
+    if not budget_status_path:
+        return None
+    return os.path.join(
+        BUDGET_STATUS_CONTAINER_DIR,
+        os.path.basename(budget_status_path),
+    )
+
+
+def _rewrite_model_for_proxy(model, cost_proxy_base_url):
+    """F2o (recursive-scientist deviation): rewrite a model string's ``@<url>``
+    suffix to point at the cost proxy instead of the public upstream.
+
+    The catalog (``model_catalog.json``) is rewritten by the host's
+    ``rewrite_catalog_for_proxy`` before the container reads it, but the
+    meta-agent / task-agent CLIs receive ``--model`` as a separate
+    argument that historically carried the raw upstream URL. Containers
+    attached to the cost-proxy ``internal=True`` bridge cannot DNS-resolve
+    the public hostname, so an un-rewritten ``--model`` arg used to hang
+    on connect.
+
+    This helper is the host-side rewrite for that path. ``cost_proxy_base_url``
+    is the bridge-internal URL (e.g. ``http://proxy:9100/v1``); model
+    strings without an ``@<url>`` suffix pass through unchanged.
+    """
+    if not cost_proxy_base_url or not model or "@" not in model:
+        return model
+    head, sep, _suffix = model.partition("@")
+    if not sep:
+        return model
+    return f"{head}@{cost_proxy_base_url}"
+
+
+def _upstream_hostname_from_model(model):
+    """Extract the upstream hostname (e.g. ``inference-api.nvidia.com``) from
+    a model string with an ``@<base_url>`` suffix. Returns ``None`` when the
+    model has no suffix or the suffix is unparseable.
+    """
+    if not model or "@" not in model:
+        return None
+    _head, _sep, suffix = model.partition("@")
+    if not suffix:
+        return None
+    from urllib.parse import urlparse
+
+    parsed = urlparse(suffix)
+    return parsed.hostname or None
 
 
 def _snapshot_train_lineage_in_container(
     container,
     current_genid,
     base_commit,
+    metadata=None,
     repo_name=REPO_NAME,
     verbose=True,
 ):
-    """F2l (recursive-scientist deviation): snapshot train-eval outputs into
-    ``/<repo_name>/lineage/gen_<current_genid>/`` inside the container and
-    commit. Excludes val/test eval directories (recognized by their
-    ``_eval_val`` / ``_eval_test`` suffix). Val/test stay copy-out only.
+    """F2l: snapshot per-gen lineage into ``/<repo_name>/lineage/gen_<id>/``
+    and commit. This is the SOLE channel through which a child container
+    inherits its parent's artifacts — no host-side tar fallback.
 
-    After this call:
-    - ``lineage/gen_<current_genid>/<domain>_eval/predictions.csv`` (and any
-      other harness-produced files in that directory) are tracked in git.
-    - ``meta_agent_chat_history.md`` is copied into the same gen dir.
-    - A single commit captures both the lineage delta AND any untracked
-      meta-agent code edits (``git add -A`` before commit). The commit
-      message is deterministic so re-runs are idempotent in audits.
+    Captured per gen:
+      - ``<domain>_eval/`` (train predictions). Val/test eval dirs are
+        excluded because their dirname suffix (``_eval_val`` / ``_eval_test``)
+        doesn't match the ``/tmp/*_eval`` glob.
+      - ``agent_output/`` (full dir — meta_agent_chat_history.md +
+        model_patch.diff + any other artifacts the meta-agent wrote).
+      - ``metadata.json`` (stub with fields known at snapshot time:
+        current_genid, parent_genid, parent_agent_success, run_eval,
+        etc. The host writes the authoritative metadata.json on its
+        side after this function returns; this stub is what *child*
+        containers see for ancestor lookups).
 
-    The richer model_patch.diff (now covering code + lineage) is emitted
-    by the caller via ``git diff --binary <base_commit>`` after this
-    function returns, written over the existing /tmp/agent_output/
-    location so the host's subsequent ``copy_from_container`` fetches
-    the full-fidelity patch.
+    A single ``git add -A`` + commit captures the lineage delta AND any
+    untracked meta-agent code edits. ``--allow-empty`` makes the call
+    idempotent for a node that produced no eval output.
+
+    The richer ``model_patch.diff`` covering code + lineage is emitted by
+    the caller via ``git diff --binary <base_commit>`` after this
+    function returns.
     """
     quoted_id = shlex.quote(str(current_genid))
     lineage_dir = f"/{repo_name}/lineage/gen_{quoted_id}"
-    # Build the shell command as a heredoc-style block so the loop runs
-    # cleanly inside ``sh -c``. We mkdir, copy every ``/tmp/<x>_eval``
-    # directory that doesn't have a ``_val`` or ``_test`` suffix in its
-    # parent name, and copy the chat-history file alongside.
+    metadata_payload = json.dumps(metadata or {}, indent=2, default=str)
+    metadata_quoted = shlex.quote(metadata_payload)
     cmd = (
         f"set -e ; "
         f"mkdir -p {lineage_dir} ; "
         f"for d in /tmp/*_eval ; do "
-        f"  if [ -d \"$d\" ] ; then "
-        f"    cp -r \"$d\" \"{lineage_dir}/\" ; "
+        f'  if [ -d "$d" ] ; then '
+        f'    cp -r "$d" "{lineage_dir}/" ; '
         f"  fi ; "
         f"done ; "
-        f"if [ -f /tmp/agent_output/meta_agent_chat_history.md ] ; then "
-        f"  cp /tmp/agent_output/meta_agent_chat_history.md "
-        f"     {lineage_dir}/meta_agent_chat_history.md ; "
+        f"if [ -d /tmp/agent_output ] ; then "
+        f"  cp -r /tmp/agent_output {lineage_dir}/agent_output ; "
         f"fi ; "
+        f"printf '%s\\n' {metadata_quoted} > {lineage_dir}/metadata.json ; "
         f"echo F2L_SNAPSHOT_COMPLETE"
     )
     exec_result = container.exec_run(
@@ -214,6 +240,7 @@ def eval_produced_agent(
     eval_test=False,
     reasoning_effort=None,
     splits=None,
+    budget_status_path=None,
 ):
     # F2c (recursive-scientist deviation): when ``splits`` is supplied
     # (a non-None list[str]), iterate over exactly those splits instead
@@ -253,6 +280,8 @@ def eval_produced_agent(
         ]
         if reasoning_effort:
             command += ["--reasoning_effort", reasoning_effort]
+        if budget_status_path:
+            command += ["--budget_status_path", budget_status_path]
         exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
         log_container_output(exec_result)
         command = [
@@ -277,116 +306,6 @@ def eval_produced_agent(
             source_path=container_evaloutput_folder,
             dest_path=evaloutput_folder,
         )
-
-
-def copy_prev_eval_to_container(
-    container,
-    prev_eval_path,
-    container_output_folder,
-    current_genid=None,
-    parent_genid=None,
-    container_folder_name=None,
-):
-    """Copy the entire prev_eval_path into the container, then remove unwanted files/dirs in the container"""
-    if not os.path.exists(prev_eval_path):
-        raise FileNotFoundError(f"Previous eval path not found: {prev_eval_path}")
-
-    # Normalize and construct destination path in container
-    prev_eval_path = os.path.normpath(prev_eval_path)
-    tail = os.path.join(*prev_eval_path.split(os.sep)[-1:])
-    container_prev_eval_path = os.path.join(container_output_folder, tail)
-
-    # Ensure destination parent exists
-    container.exec_run(["mkdir", "-p", container_output_folder], workdir="/")
-
-    # Copy the whole tree into the container in one go
-    copy_to_container(
-        container, source_path=prev_eval_path, dest_path=container_prev_eval_path
-    )
-
-    lineage_gen_dirs = _lineage_gen_dirs(prev_eval_path, parent_genid)
-    non_lineage_prune_cmds = _non_lineage_prune_cmds(
-        prev_eval_path, container_prev_eval_path, lineage_gen_dirs
-    )
-
-    # Now prune inside the container
-    prune_cmds = [
-        *non_lineage_prune_cmds,
-        # Remove current genid folder
-        f"find '{container_prev_eval_path}' -type d -name 'gen_{current_genid}' -prune -exec rm -rf {{}} +",
-        # 1) Remove val/test eval directories
-        f"find '{container_prev_eval_path}' -type d -name '*_eval_val*' -prune -exec rm -rf {{}} +",
-        f"find '{container_prev_eval_path}' -type d -name '*_eval_test*' -prune -exec rm -rf {{}} +",
-        # 2) Remove any directories containing the repo name (copied worktrees, etc.)
-        f"find '{container_prev_eval_path}' -type d -name '*{REPO_NAME}*' -prune -exec rm -rf {{}} +",
-        # 3) Remove compiled Python files
-        f"find '{container_prev_eval_path}' -type f -name '*.pyc' -delete",
-        # 4) Remove files whose base name indicates val/test (with/without extensions)
-        #    *_val, *_val.*, *_val_*, and same for _test
-        f"find '{container_prev_eval_path}' -type f \\( -name '*_val' -o -name '*_val.*' -o -name '*_val_*' \\) -delete",
-        f"find '{container_prev_eval_path}' -type f \\( -name '*_test' -o -name '*_test.*' -o -name '*_test_*' \\) -delete",
-    ]
-
-    for cmd in prune_cmds:
-        exec_result = container.exec_run(["bash", "-lc", cmd], workdir="/")
-
-    # Confirm files remaining were copied
-    exec_result = container.exec_run(
-        ["ls", "-l", container_prev_eval_path], workdir="/"
-    )
-    log_container_output(exec_result)
-
-    # Move the folder to a new name
-    if container_folder_name is not None:
-        new_container_prev_eval_path = os.path.join(
-            container_output_folder, container_folder_name
-        )
-        container.exec_run(
-            ["mv", container_prev_eval_path, new_container_prev_eval_path], workdir="/"
-        )
-        log_container_output(exec_result)
-        container_prev_eval_path = new_container_prev_eval_path
-
-    return container_prev_eval_path
-
-
-def _lineage_gen_dirs(output_dir, parent_genid):
-    if parent_genid is None:
-        return set()
-
-    lineage_gen_dirs = set()
-    seen = set()
-    genid = parent_genid
-    while genid is not None and genid not in seen:
-        seen.add(genid)
-        lineage_gen_dirs.add(f"gen_{genid}")
-        genid = _read_parent_genid(output_dir, genid)
-
-    return lineage_gen_dirs
-
-
-def _non_lineage_prune_cmds(prev_eval_path, container_prev_eval_path, lineage_gen_dirs):
-    non_lineage_prune_cmds = []
-    if not lineage_gen_dirs:
-        return non_lineage_prune_cmds
-    for name in os.listdir(prev_eval_path):
-        if name not in lineage_gen_dirs:
-            non_lineage_prune_cmds.append(
-                f"find '{container_prev_eval_path}' -mindepth 1 -maxdepth 1 -name '{name}' -exec rm -rf {{}} +"
-            )
-    return non_lineage_prune_cmds
-
-
-def _read_parent_genid(output_dir, genid):
-    metadata_file = os.path.join(output_dir, f"gen_{genid}", "metadata.json")
-    if not os.path.exists(metadata_file):
-        return None
-    with open(metadata_file, "r") as f:
-        metadata = json.load(f)
-    parent_genid = metadata.get("parent_genid")
-    if parent_genid == -1 or parent_genid == "-1":
-        return None
-    return parent_genid
 
 
 def run_generation_step(
@@ -418,10 +337,17 @@ def run_generation_step(
     splits=None,
     cost_proxy_enabled=None,
     cost_proxy_network=None,
-    cost_proxy_health_url=None,
-    cost_proxy_deadline_ts=None,
-    cost_proxy_budget_usd=None,
+    cost_proxy_base_url=None,
+    budget_status_path=None,
+    produce_patch=True,
 ):
+    """``produce_patch=True`` is the canonical generator pass (train): it
+    runs F2l snapshot + ``git diff`` and writes ``model_patch.diff``.
+    ``produce_patch=False`` is a measurement pass (val/test/cross-eval):
+    it applies the gen's full patch chain, runs eval, but does NOT touch
+    the canonical ``model_patch.diff``. Mixing the two on the same gen
+    used to corrupt the patch into MODIFY-style hunks that fail when
+    later replayed against a fresh root_commit checkout."""
     # Per-role model routing: the legacy ``model`` keyword is the uniform
     # fallback (still required by the polyglot harness path). ``meta_agent_model``
     # overrides the meta-agent invocation only; ``task_agent_models`` is a
@@ -447,6 +373,35 @@ def run_generation_step(
         else reasoning_effort
     )
     _task_agent_reasoning_efforts = dict(task_agent_reasoning_efforts or {})
+    # F2o (recursive-scientist deviation): when the cost proxy is enabled,
+    # rewrite every ``--model`` arg's ``@<url>`` suffix to point at the
+    # bridge-internal proxy URL (``http://proxy:<port>/v1``). The catalog
+    # is rewritten separately by ``rewrite_catalog_for_proxy``; the CLI
+    # ``--model`` args are an independent channel that used to leak the
+    # raw upstream URL and trigger a DNS-resolution hang inside the
+    # ``internal=True`` cost-proxy bridge.
+    cost_proxy_upstream_hostnames = ()
+    if cost_proxy_enabled and cost_proxy_base_url:
+        # Collect upstream hostnames BEFORE rewriting so the lockdown can
+        # also map them to the bridge gateway as a fail-fast safety net.
+        upstream_hostnames = set()
+        for source in (
+            (model,) if model is not None else (),
+            (meta_agent_model,) if meta_agent_model is not None else (),
+            tuple(_task_agent_models.values()),
+        ):
+            for m in source:
+                hostname = _upstream_hostname_from_model(m)
+                if hostname:
+                    upstream_hostnames.add(hostname)
+        cost_proxy_upstream_hostnames = tuple(sorted(upstream_hostnames))
+        if model is not None:
+            model = _rewrite_model_for_proxy(model, cost_proxy_base_url)
+        meta_agent_model = _rewrite_model_for_proxy(meta_agent_model, cost_proxy_base_url)
+        _task_agent_models = {
+            d: _rewrite_model_for_proxy(m, cost_proxy_base_url)
+            for d, m in _task_agent_models.items()
+        }
     # Setup local output folder
     prev_gen_dir = os.path.join(output_dir, f"gen_{parent_genid}")
     gen_output_dir = os.path.join(output_dir, f"gen_{current_genid}")
@@ -475,36 +430,81 @@ def run_generation_step(
         domains=domains,
         cost_proxy_enabled=cost_proxy_enabled,
         cost_proxy_network=cost_proxy_network,
-        cost_proxy_health_url=cost_proxy_health_url,
-        cost_proxy_deadline_ts=cost_proxy_deadline_ts,
-        cost_proxy_budget_usd=cost_proxy_budget_usd,
+        cost_proxy_upstream_hostnames=cost_proxy_upstream_hostnames,
+        budget_status_path=budget_status_path,
     )
     container.start()
     container_output_folder = "/tmp/"
+    container_budget_status_path = _container_budget_status_path(budget_status_path)
 
     try:
         # Apply meta patches (only for starting node, because subsequent generations will inherit the patches from the parent)
         if is_starting_node(current_genid):
             meta_patch_files = meta_patch_files or []
             commit_hash = apply_diffs_container(container, meta_patch_files)
-            metadata["prev_patch_files"] += meta_patch_files
+            if produce_patch:
+                metadata["prev_patch_files"] += meta_patch_files
 
         # Apply all lineage diffs
         patch_files = get_patch_files(output_dir, parent_genid) if parent_patch_files is None else parent_patch_files
-        metadata["prev_patch_files"] += patch_files
+        # Measurement passes (``produce_patch=False``) apply patches to set
+        # up the workspace state but must NOT mutate the canonical
+        # ``prev_patch_files`` for the gen -- the train pass already
+        # recorded the chain, and overwriting it here would put the
+        # gen's own patch into ``prev_patch_files`` and create
+        # duplicate entries that break later ``patch -p1`` replay.
+        #
+        # For producer passes (train), the host passes ``parent_patch_files``
+        # = ``get_patch_files(node.id) = prev + curr`` from the prior
+        # meta-agent step. ``curr`` at that point already contains the
+        # gen's OWN patch path. We must apply the full chain to set up
+        # the workspace (parent lineage + self's code edits) but should
+        # NOT record self's patch in ``prev_patch_files`` -- self belongs
+        # in ``curr`` and adding it to prev double-counts. Without this
+        # dedupe, downstream consumers see ``prev + curr = [parent, self, self]``
+        # and the second ``patch -p1`` of self fails with
+        # "file already exists" (the first apply already created the
+        # lineage subtree).
+        self_patch_path = os.path.normpath(
+            os.path.join(gen_output_dir, "agent_output", "model_patch.diff")
+        )
+        if produce_patch:
+            parent_chain_only = [
+                p for p in patch_files if os.path.normpath(p) != self_patch_path
+            ]
+            metadata["prev_patch_files"] += parent_chain_only
         commit_hash = apply_diffs_container(container, patch_files)
 
+        # F2l Phase 3 (recursive-scientist deviation): define agent_output
+        # paths and ensure both ends (host + container) exist
+        # unconditionally. The bootstrap eval path (run_meta_agent=False)
+        # still needs these so F2l can snapshot its eval results into
+        # /<REPO_NAME>/lineage/gen_initial/ and emit a model_patch.diff
+        # that descendants apply -- without this lift, the F2l block
+        # crashes with UnboundLocalError on gen_initial.
+        local_agentoutput_folder = os.path.join(gen_output_dir, "agent_output/")
+        container_agentoutput_folder = os.path.join(
+            container_output_folder, "agent_output"
+        )
+        os.makedirs(local_agentoutput_folder, exist_ok=True)
+        container.exec_run(
+            ["mkdir", "-p", container_agentoutput_folder], workdir="/"
+        )
+
         if run_meta_agent:
-            # Copy previous generations to container
-            container_prev_eval_path = copy_prev_eval_to_container(
-                container, output_dir, container_output_folder, current_genid=current_genid, parent_genid=parent_genid,
+            # F2l Phase 3 (recursive-scientist deviation): the parent's
+            # train-eval lineage already landed in /<REPO_NAME>/lineage/
+            # via the patches applied above. No host-side tar of
+            # output_dir is needed -- predictions, agent_output/, and
+            # metadata.json all flow via patches. The meta-agent's
+            # eval_path simply points at the lineage tree.
+            container_prev_eval_path = f"/{REPO_NAME}/lineage"
+            container.exec_run(
+                ["mkdir", "-p", container_prev_eval_path], workdir="/"
             )
 
             # Run meta agent
             safe_log("Running meta agent...")
-            container_agentoutput_folder = os.path.join(
-                container_output_folder, "agent_output"
-            )
             container_chat_history_file = os.path.join(
                 container_agentoutput_folder, "meta_agent_chat_history.md"
             )
@@ -532,6 +532,8 @@ def run_generation_step(
             ]
             if meta_agent_reasoning_effort:
                 command += ["--reasoning_effort", meta_agent_reasoning_effort]
+            if container_budget_status_path:
+                command += ["--budget_status_path", container_budget_status_path]
 
             exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
             log_container_output(exec_result)
@@ -544,36 +546,15 @@ def run_generation_step(
             # ``killed_by="time"`` when this is 124.
             metadata["meta_agent_exit_code"] = int(exec_result.exit_code or 0)
 
-            # Copy container outputs to local
-            local_agentoutput_folder = os.path.join(gen_output_dir, "agent_output/")
+            # Copy container outputs to local. ``local_agentoutput_folder``
+            # is defined unconditionally above the ``if run_meta_agent``
+            # block so the F2l flow can also reach it on the bootstrap
+            # eval path.
             copy_from_container(
                 container,
                 source_path=container_agentoutput_folder,
                 dest_path=local_agentoutput_folder,
             )
-
-            # F-class: pull the updated llm_calls.jsonl back to the host so
-            # the host's rebuild_cost_md can re-render cost.md from the
-            # merged log. Best-effort -- the meta-agent may not have made
-            # any LLM calls if it errored early.
-            container_jsonl = os.path.join(
-                container_prev_eval_path, "llm_calls.jsonl"
-            )
-            host_jsonl = os.path.join(output_dir, "llm_calls.jsonl")
-            tmp_jsonl = os.path.join(
-                gen_output_dir,
-                f"llm_calls.{os.getpid()}.{current_genid}.{uuid.uuid4().hex}.jsonl",
-            )
-            try:
-                copy_from_container(
-                    container, source_path=container_jsonl, dest_path=tmp_jsonl
-                )
-                _append_jsonl_file(tmp_jsonl, host_jsonl)
-            except Exception as exc:
-                safe_log(f"warn: could not extract llm_calls.jsonl: {exc}")
-            finally:
-                if os.path.exists(tmp_jsonl):
-                    os.unlink(tmp_jsonl)
 
             # Check if agent produced a diff
             local_patch_file = os.path.join(
@@ -606,6 +587,7 @@ def run_generation_step(
                         domain, reasoning_effort
                     ),
                     splits=splits,
+                    budget_status_path=container_budget_status_path,
                 )
 
             # Small sample size evaluation for staged eval
@@ -657,75 +639,71 @@ def run_generation_step(
                         raise
                 metadata["run_full_eval"] = True
 
-            # F2l (recursive-scientist deviation): snapshot train-eval
-            # outputs into ``/<REPO_NAME>/lineage/gen_<id>/`` and rewrite
-            # model_patch.diff so it carries code + train lineage as one
-            # patch. Child containers that ``git apply`` this richer
-            # patch get the parent's train predictions in their working
-            # tree without any host-side tar-of-output_dir.
-            #
-            # Phase 1: additive. ``copy_prev_eval_to_container`` is still
-            # active on the host as the load-bearing path. After child
-            # containers verify they receive the lineage via this patch
-            # (Phase 2), the parallel host-side tar is removed (Phase 3).
-            #
-            # On failure, log + suppress: this is additive scaffolding;
-            # any error here must not block the production train+val
-            # flow that already completed above.
-            try:
-                _snapshot_train_lineage_in_container(
-                    container,
-                    current_genid=current_genid,
-                    base_commit=commit_hash,
-                    verbose=False,
-                )
-                # Preserve the existing (pre-eval, code-only) patch under
-                # ``code_only_patch.diff`` for analysis before we
-                # overwrite the canonical ``model_patch.diff`` with the
-                # richer code+lineage diff. The original was already
-                # copied to the host by the earlier ``copy_from_container``
-                # call above (line ~548-553), so this is a host-side
-                # rename.
-                existing_model_patch = os.path.join(
-                    local_agentoutput_folder, "model_patch.diff"
-                )
-                code_only_path = os.path.join(
-                    local_agentoutput_folder, "code_only_patch.diff"
-                )
-                if os.path.exists(existing_model_patch) and not os.path.exists(
-                    code_only_path
-                ):
-                    shutil.copy(existing_model_patch, code_only_path)
-                # Emit the richer model_patch.diff INSIDE the container,
-                # then copy it back over the host's existing file.
-                # ``--binary`` so any non-text harness artifact still
-                # round-trips through patch -p1. ``--no-color`` to keep
-                # the output script-safe.
-                in_container_patch = (
-                    f"{container_agentoutput_folder}/model_patch.diff"
-                )
-                cmd = (
-                    f"git diff --binary --no-color {shlex.quote(commit_hash)} "
-                    f"> {shlex.quote(in_container_patch)}"
-                )
-                exec_result = container.exec_run(
-                    cmd=["/bin/sh", "-c", cmd], workdir=f"/{REPO_NAME}"
-                )
-                log_container_output(exec_result, verbose=False)
-                if exec_result.exit_code != 0:
-                    raise RuntimeError(
-                        f"F2l git diff failed with exit {exec_result.exit_code}"
+            # F2l: snapshot lineage + emit the canonical model_patch.diff.
+            # Only fires on the TRAIN/generator pass (``produce_patch=True``).
+            # Val/test/cross-eval passes (``produce_patch=False``) skip this
+            # entire block so they cannot overwrite the gen's canonical
+            # patch with a post-apply-of-parents MODIFY-style diff that
+            # would later fail ``patch -p1`` against a fresh root_commit.
+            if produce_patch:
+                try:
+                    _snapshot_train_lineage_in_container(
+                        container,
+                        current_genid=current_genid,
+                        base_commit=commit_hash,
+                        metadata=metadata,
+                        verbose=False,
                     )
-                copy_from_container(
-                    container,
-                    source_path=in_container_patch,
-                    dest_path=existing_model_patch,
-                )
-            except Exception as lineage_exc:  # noqa: BLE001 -- F2l is additive
-                safe_log(
-                    f"F2l lineage snapshot skipped: {lineage_exc}",
-                    level=logging.WARNING,
-                )
+                    # Preserve the meta-agent's (pre-snapshot, code-only)
+                    # patch under ``code_only_patch.diff`` before the
+                    # canonical ``model_patch.diff`` is overwritten with
+                    # the richer code+lineage diff.
+                    existing_model_patch = os.path.join(
+                        local_agentoutput_folder, "model_patch.diff"
+                    )
+                    code_only_path = os.path.join(
+                        local_agentoutput_folder, "code_only_patch.diff"
+                    )
+                    if os.path.exists(existing_model_patch) and not os.path.exists(
+                        code_only_path
+                    ):
+                        shutil.copy(existing_model_patch, code_only_path)
+                    in_container_patch = (
+                        f"{container_agentoutput_folder}/model_patch.diff"
+                    )
+                    cmd = (
+                        f"git diff --binary --no-color {shlex.quote(commit_hash)} "
+                        f"> {shlex.quote(in_container_patch)}"
+                    )
+                    exec_result = container.exec_run(
+                        cmd=["/bin/sh", "-c", cmd], workdir=f"/{REPO_NAME}"
+                    )
+                    log_container_output(exec_result, verbose=False)
+                    if exec_result.exit_code != 0:
+                        raise RuntimeError(
+                            f"F2l git diff failed with exit {exec_result.exit_code}"
+                        )
+                    copy_from_container(
+                        container,
+                        source_path=in_container_patch,
+                        dest_path=existing_model_patch,
+                    )
+                except Exception as lineage_exc:  # noqa: BLE001 -- F2l is additive
+                    safe_log(
+                        f"F2l lineage snapshot skipped: {lineage_exc}",
+                        level=logging.WARNING,
+                    )
+
+                # Register the (possibly F2l-regenerated) ``model_patch.diff``
+                # in ``curr_patch_files`` when present and non-empty.
+                # Only on generator passes -- measurement passes must not
+                # mutate the patch chain.
+                final_patch = os.path.join(local_agentoutput_folder, "model_patch.diff")
+                if (
+                    file_exist_and_not_empty(final_patch)
+                    and final_patch not in metadata["curr_patch_files"]
+                ):
+                    metadata["curr_patch_files"].append(final_patch)
 
     except Exception as e:
         safe_log(f"Error in generate: {e}")
@@ -754,8 +732,16 @@ def run_generation_step(
             ]
         )
         metadata["valid_parent"] = metadata["run_eval"] and (eval_successful or meta_patch_files is not None)
-        with open(os.path.join(gen_output_dir, "metadata.json"), "w") as f:
-            json.dump(metadata, f, indent=4)
+        # Measurement passes (``produce_patch=False``) must not overwrite
+        # the gen's canonical metadata.json -- the train pass already
+        # wrote it with the authoritative ``prev_patch_files`` /
+        # ``curr_patch_files`` chain. A measurement pass that re-writes
+        # would clobber the chain (its local ``metadata`` dict starts
+        # fresh on entry to this function and only knows what was
+        # passed in, not what the train pass committed).
+        if produce_patch:
+            with open(os.path.join(gen_output_dir, "metadata.json"), "w") as f:
+                json.dump(metadata, f, indent=4)
 
     return metadata
 
@@ -793,6 +779,7 @@ if __name__ == "__main__":
         help="OpenAI-style reasoning_effort applied to meta + task agent calls",
     )
     parser.add_argument("--iterations_left", type=int, default=0)
+    parser.add_argument("--budget_status_path", type=str, default=None)
     parser.add_argument(
         "--eval_samples",
         type=int,
@@ -955,4 +942,5 @@ if __name__ == "__main__":
         eval_test=args.eval_test,
         skip_staged_eval=args.skip_staged_eval,
         splits=args.splits,
+        budget_status_path=args.budget_status_path,
     )
