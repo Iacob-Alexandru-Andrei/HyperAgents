@@ -204,17 +204,9 @@ def _maybe_compact_history(
     if est_tokens <= soft_cap:
         return msg_history
 
-    if len(msg_history) < 2:
-        # Only the initial user message present; nothing to summarize.
-        return msg_history
-
-    span = msg_history[1:]
-    if not span:
-        return msg_history
-
     _MAX_CHARS_PER_MSG = 32000
     truncated_blob_parts = []
-    for m in span:
+    for m in msg_history:
         if not isinstance(m, dict):
             continue
         content = m.get("content", "") or ""
@@ -235,7 +227,7 @@ def _maybe_compact_history(
     try:
         logging(
             f"COMPACTION: est_tokens={est_tokens} > soft_cap={soft_cap}; "
-            f"summarizing {len(span)} message(s) of span"
+            f"summarizing {len(msg_history)} message(s)"
         )
         summary, _summary_history, _info = call_fn(
             msg=summary_prompt,
@@ -252,11 +244,11 @@ def _maybe_compact_history(
         summary = "" if summary is None else str(summary)
     summary = _truncate_to_tokens(summary, summary_max_tok)
     compacted = {
-        "role": "assistant",
+        "role": "user",
         "content": f"<COMPACTED HISTORY>\n{summary}\n</COMPACTED HISTORY>",
     }
 
-    new_history = [msg_history[0], compacted]
+    new_history = [compacted]
 
     post_tokens = _estimate_tokens(
         new_history, input_msg, budget_status_path=budget_status_path
@@ -267,9 +259,8 @@ def _maybe_compact_history(
             f"tokens still exceeds soft_cap {soft_cap}."
         )
     logging(
-        f"COMPACTION: compacted {len(span)} message(s) -> 1 summary "
-        f"(post_tokens={post_tokens}, soft_cap={soft_cap}); marker "
-        "<COMPACTED HISTORY> emitted."
+        f"COMPACTION: compacted {len(msg_history)} message(s) -> 1 summary "
+        f"(post_tokens={post_tokens}, soft_cap={soft_cap})."
     )
     return new_history
 
