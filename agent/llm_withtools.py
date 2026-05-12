@@ -208,14 +208,27 @@ def _maybe_compact_history(
         # Only the initial user message present; nothing to summarize.
         return msg_history
 
-    keep_tail = _is_tool_result_message(msg_history[-1]) and len(msg_history) >= 3
-    span = msg_history[1:-1] if keep_tail else msg_history[1:]
+    span = msg_history[1:]
     if not span:
         return msg_history
 
-    history_blob = "\n\n".join(
-        m.get("content", "") for m in span if isinstance(m, dict)
-    )
+    _MAX_CHARS_PER_MSG = 32000
+    truncated_blob_parts = []
+    for m in span:
+        if not isinstance(m, dict):
+            continue
+        content = m.get("content", "") or ""
+        if len(content) > _MAX_CHARS_PER_MSG:
+            head_len = _MAX_CHARS_PER_MSG // 2
+            tail_len = _MAX_CHARS_PER_MSG - head_len
+            dropped = len(content) - _MAX_CHARS_PER_MSG
+            content = (
+                content[:head_len]
+                + f"\n...[{dropped} chars omitted before compaction]...\n"
+                + content[-tail_len:]
+            )
+        truncated_blob_parts.append(content)
+    history_blob = "\n\n".join(truncated_blob_parts)
     summary_prompt = _COMPACTION_SUMMARY_PROMPT.format(history=history_blob)
 
     call_fn = summarize_fn or get_response_from_llm
@@ -244,17 +257,14 @@ def _maybe_compact_history(
     }
 
     new_history = [msg_history[0], compacted]
-    if keep_tail:
-        new_history.append(msg_history[-1])
 
     post_tokens = _estimate_tokens(
         new_history, input_msg, budget_status_path=budget_status_path
     )
     if post_tokens > soft_cap:
         raise RuntimeError(
-            "compaction insufficient: post-compaction estimate "
-            f"{post_tokens} tokens still exceeds soft_cap {soft_cap} "
-            "(likely a single retained message is itself larger than the cap)."
+            f"compaction insufficient: post-compaction estimate {post_tokens} "
+            f"tokens still exceeds soft_cap {soft_cap}."
         )
     logging(
         f"COMPACTION: compacted {len(span)} message(s) -> 1 summary "
