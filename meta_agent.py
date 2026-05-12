@@ -81,10 +81,11 @@ class MetaAgent(AgentSystem):
             "task). The evaluator is external -- improving your agents to "
             "genuinely produce better outputs is the path forward; gaming "
             "the parser or breaking the harness scores 0."
-            "\n\nEach `<domain>_eval/report.json` distinguishes `malformed_qids` (LLM "
-            "output couldn't be parsed -> outcome=0 by convention; the agent failed to "
-            "produce parseable output) from `question_ids_failed_real` (parsed but "
-            "wrong prediction)."
+            "\n\nEach `<domain>_eval/report.json` lists `question_ids_passed` "
+            "and `question_ids_failed`. A failed qid means either the LLM's "
+            "output couldn't be parsed (counts as outcome=0 by convention) or "
+            "it parsed but predicted the wrong answer; both are visible in "
+            "`predictions.csv` row-by-row."
         )
 
         new_msg_history = chat_with_agent(
