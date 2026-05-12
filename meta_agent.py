@@ -27,11 +27,8 @@ class MetaAgent(AgentSystem):
             eval_path (str): The path to previously generated agents and their evaluation results.
             iterations_left (int, optional): The number of remaining iterations in which the meta agent will be invoked in future. Defaults to None.
         """
-        # Load the model catalog written by the host before the container
-        # started. When the catalog is present, query_model is enabled with
-        # this list bound via functools.partial inside load_tools; when absent
-        # the tool advertises itself as disabled and refuses to fire.
-        catalog_path = os.path.join(eval_path, "model_catalog.json")
+        # Load the model catalog the host committed into <repo>/lineage/.
+        catalog_path = os.path.join(repo_path, "lineage", "model_catalog.json")
         catalog = []
         if os.path.exists(catalog_path):
             try:
