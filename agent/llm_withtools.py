@@ -412,19 +412,28 @@ def chat_with_agent(
         tools_dict = {tool['info']['name']: tool for tool in all_tools}
         system_msg = f"{get_tooluse_prompt([tool['info'] for tool in all_tools])}\n\n"
         num_tool_calls = 0
-
-        # Call API
-        input_msg = _budget_status_prefix(budget_status_path) + system_msg + msg
         _INPUT_MSG_CAP = 32000
-        if len(input_msg) > _INPUT_MSG_CAP:
+
+        def _cap_input_msg(s):
+            if len(s) <= _INPUT_MSG_CAP:
+                return s
             head_len = _INPUT_MSG_CAP // 2
             tail_len = _INPUT_MSG_CAP - head_len
-            dropped = len(input_msg) - _INPUT_MSG_CAP
-            input_msg = (
-                input_msg[:head_len]
+            dropped = len(s) - _INPUT_MSG_CAP
+            return (
+                s[:head_len]
                 + f"\n...[{dropped} chars omitted from input_msg]...\n"
-                + input_msg[-tail_len:]
+                + s[-tail_len:]
             )
+
+        # system_msg is included on the first call and after each compaction
+        # (compaction summarises history without the system prompt, so the
+        # next call must restore it). Otherwise the prompt is in msg_history
+        # already and re-emitting it wastes ~2K tokens per round.
+        input_msg = _cap_input_msg(
+            _budget_status_prefix(budget_status_path) + system_msg + msg
+        )
+        prev_history_obj = new_msg_history
         new_msg_history = _maybe_compact_history(
             new_msg_history,
             input_msg,
@@ -434,6 +443,7 @@ def chat_with_agent(
             logging=logging,
             budget_status_path=budget_status_path,
         )
+        compacted_last_round = new_msg_history is not prev_history_obj
         logging(f"Input: {repr(input_msg)}")
         response, new_msg_history, info = get_response_fn(
             msg=input_msg,
@@ -492,12 +502,16 @@ def chat_with_agent(
                 logging(err_msg)
                 tool_msgs.append(err_msg)
 
-            # Get tool response
-            input_msg = (
+            # Get tool response. system_msg is in msg_history already (sent
+            # on round 1); only re-prepend it when the previous round
+            # compacted (which dropped the system prompt from history).
+            prefix = system_msg if compacted_last_round else ""
+            input_msg = _cap_input_msg(
                 _budget_status_prefix(budget_status_path)
-                + system_msg
+                + prefix
                 + '\n\n'.join(tool_msgs)
             )
+            prev_history_obj = new_msg_history
             new_msg_history = _maybe_compact_history(
                 new_msg_history,
                 input_msg,
@@ -505,7 +519,9 @@ def chat_with_agent(
                 catalog=catalog,
                 reasoning_effort=reasoning_effort,
                 logging=logging,
+                budget_status_path=budget_status_path,
             )
+            compacted_last_round = new_msg_history is not prev_history_obj
             logging(f"Input: {repr(input_msg)}")
             response, new_msg_history, info = get_response_fn(
                 msg=input_msg,
