@@ -5,26 +5,17 @@ import re
 from agent.llm import get_response_from_llm
 from agent.tools import load_tools
 
-# F2o (recursive-scientist deviation): the cost proxy writes a JSON
-# status file alongside the markdown one (``status.latest.json``). The
-# JSON carries ``cumulative_prompt_tokens`` and ``cumulative_chat_chars``
-# which the compaction trigger reads to derive a live bytes-per-token
-# compression ratio. The two files are siblings of ``status.md``; the
-# host mounts the entire ``budget_dir`` at ``BUDGET_STATUS_CONTAINER_DIR``
-# so this side-band lookup is just a sibling filename read.
+# Cost-proxy status sidecar: a JSON file written next to ``status.md`` with
+# ``cumulative_prompt_tokens`` / ``cumulative_chat_chars``. Used to derive a
+# live bytes-per-token ratio for the compaction trigger.
 _PROXY_STATUS_JSON_BASENAME = "status.latest.json"
-# Conservative bytes-per-token fallback used before the proxy has logged
-# any usage. 3.0 over-estimates (more bytes per token than reality for
-# Nemotron's reasoning-heavy turns, where the live ratio settles around
-# 3.0-3.5) so compaction errs on the side of firing early rather than
-# late. ``chars / 3.0`` overshoots; ``chars / 4.0`` (the legacy default)
-# undershoots and triggered the May 11-12 late-compaction incident.
+# Conservative bytes-per-token fallback used before the proxy has logged any
+# usage. 3.0 over-estimates relative to the typical live ratio (3.0-3.5 for
+# reasoning-heavy turns) so compaction fires early rather than late.
 _COMPRESSION_RATIO_FALLBACK = 3.0
-# Hard floor below which we never trust the live ratio. A transient
-# under-report of ``cumulative_chat_chars`` (e.g. a first response that
-# got streamed before its tokens were logged) could otherwise push the
-# ratio toward 1.0 and make the compactor think the model is suddenly
-# 1-byte-per-token, which would never fire.
+# Hard floor below which we never trust the live ratio: a transient
+# under-report of ``cumulative_chat_chars`` could otherwise push the ratio
+# toward 1.0 and make the compactor under-estimate token cost.
 _COMPRESSION_RATIO_FLOOR = 2.0
 
 
@@ -48,18 +39,12 @@ def _read_proxy_status_tokens(budget_status_path):
     """Read ``(cumulative_prompt_tokens, cumulative_chat_chars)`` from the
     proxy's JSON status file (sibling of ``status.md``).
 
-    Returns ``(None, None)`` when:
-      - ``budget_status_path`` is unset,
-      - the sibling JSON file does not exist (first call before the proxy
-        has logged any usage),
-      - the JSON is empty or malformed,
-      - the required fields are absent (older proxy versions before the
-        F2o schema bump).
-    A return of ``(0, 0)`` is distinguishable from ``(None, None)``:
-    ``(0, 0)`` means the proxy is up but no chat completion has been
-    intercepted yet (e.g. between leases); ``(None, None)`` means we have
-    no observation at all and the caller should use the conservative
-    fallback ratio.
+    Returns ``(None, None)`` when ``budget_status_path`` is unset, the sibling
+    JSON file does not exist, is empty/malformed, or the required fields are
+    absent. ``(0, 0)`` is distinguishable from ``(None, None)``: ``(0, 0)``
+    means the proxy is up but no chat completion has been intercepted yet;
+    ``(None, None)`` means no observation at all and the caller should use the
+    conservative fallback ratio.
     """
     if not budget_status_path:
         return None, None
@@ -186,14 +171,11 @@ def _maybe_compact_history(
     summarize_fn=None,
     budget_status_path=None,
 ):
-    """Compact ``msg_history`` in place when the estimated token count exceeds
-    the model's soft cap. Returns the (possibly new) msg_history list.
+    """Compact ``msg_history`` when the estimated token count exceeds the
+    model's soft cap. Returns the (possibly new) msg_history list.
 
-    Algorithm (per the LLM-summarization context-compaction contract):
-
-    - Estimate ``est_tokens`` = ``_estimate_tokens(msg_history, input_msg,
-      budget_status_path=budget_status_path)`` -- proxy-derived live
-      ratio when available, conservative ``chars/3`` fallback otherwise.
+    - Estimate ``est_tokens`` via ``_estimate_tokens`` (proxy-derived live
+      ratio when available, ``chars/3`` fallback otherwise).
     - If under ``soft_cap`` or compaction disabled, return as-is.
     - Keep ``msg_history[0]`` (initial user message) verbatim.
     - Keep ``msg_history[-1]`` IF it looks like a tool result.
@@ -206,11 +188,9 @@ def _maybe_compact_history(
     - If the summarization call raises, log and fall through with the
       original history.
 
-    The compaction message role MUST be ``"assistant"``. Compaction events
-    are surfaced through the chat history (which run-observability layer
-    15 watches) by virtue of the ``<COMPACTED HISTORY>`` marker landing in
-    the persisted transcript on the very next ``get_response_from_llm``
-    call.
+    The compaction message role MUST be ``"assistant"`` so the
+    ``<COMPACTED HISTORY>`` marker lands in the persisted transcript on the
+    next ``get_response_from_llm`` call.
     """
     enabled, soft_cap, summary_max_tok = _resolve_compaction_config(catalog, model)
     if not enabled:
@@ -332,21 +312,11 @@ def should_retry_tool_use(response, tool_uses=None):
     Decide whether to send a corrective retry when the chat turn
     emitted no parseable tool call.
 
-    Returns True for two malformed-output patterns; the caller surfaces
-    a corrective error message that the model can incorporate on the
-    next turn:
-
-    1. **Output was truncated mid-tool.** Response is long (>=2000
-       chars) AND has the json / tool_name / tool_input markers in
-       the right order. The model started a tool call but ran out of
-       output context before closing the JSON.
-    2. **JSON body is malformed.** Same marker pattern as (1) but
-       length is irrelevant. Nemotron 3 Super in particular tends to
-       emit unterminated strings, missing closing braces, extra
-       ``</json>``-style closers, or wrong-quote styles. Without a
-       retry, the agent exits early after one bad call -- so an
-       expansion that should produce 30 tool calls produces 1, and
-       ``parent_agent_success`` ends up False with no model_patch.diff.
+    Returns True when the response shows tool-call intent (``<json>``,
+    ``tool_name``, ``tool_input`` markers in that order) but no tool was
+    parsed -- covers both mid-output truncation and malformed JSON bodies
+    (unterminated strings, missing braces, stray closing tags). The caller
+    surfaces a corrective error message the model can incorporate next turn.
     """
     # If there are tool uses, we don't need to check for retry
     if tool_uses is not None and len(tool_uses) > 0:
@@ -376,12 +346,10 @@ def check_for_tool_uses(response):
     Checks if the response contains one or more tool calls in json code blocks.
     Returns a list of tool use dictionaries.
 
-    F-class: balanced-brace scan instead of strict ``<json>...</json>`` regex.
-    Some models (e.g. Nemotron) emit ``</script>`` (or other tag mismatches)
-    as the closing token, which breaks the original regex and silently
-    returns no tool uses -- making every meta-agent expansion a no-op. The
-    scanner here only requires the ``<json>`` opening hint and then a
-    syntactically balanced JSON object; the closing tag is ignored.
+    Uses a balanced-brace scan instead of a strict ``<json>...</json>`` regex
+    so tag mismatches (e.g. a stray ``</script>`` closer) do not silently drop
+    all tool calls. Only the ``<json>`` opening hint plus a syntactically
+    balanced JSON object are required; the closing tag is ignored.
     """
     tool_uses = []
     pos = 0
@@ -422,7 +390,7 @@ def chat_with_agent(
     multiple_tool_calls=False,  # Whether to allow multiple tool calls in a single response
     max_tool_calls=40,  # Maximum number of tool calls allowed in a single response, -1 for unlimited
     reasoning_effort=None,
-    catalog=None,  # F-class: model_catalog injected into tools that declare it (query_model).
+    catalog=None,  # model_catalog injected into tools that declare it (query_model).
     budget_status_path=None,
     workspace_root=None,
     current_gen=None,
@@ -498,12 +466,8 @@ def chat_with_agent(
 
             # Check for retry
             if retry_tool_use:
-                # Distinguish "ran out of output context" from "JSON
-                # body was malformed" so the model can correct
-                # appropriately on the next turn. Both produce the same
-                # observable shape (markers present, no tool parsed),
-                # so we hint at both possibilities and quote the
-                # common Nemotron 3 Super failure modes.
+                # Both truncation and malformed JSON produce the same observable
+                # shape (markers present, no tool parsed); hint at both.
                 err_msg = (
                     "Error: your previous response contained a tool-call "
                     "intent (``<json>`` markers + ``tool_name`` + ``tool_input``) "

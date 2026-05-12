@@ -62,13 +62,11 @@ def extract_jsons(response):
             if obj is not None:
                 extracted_jsons.append(obj)
 
-    # F2g: reasoning models (e.g. Nemotron 3 Super) routinely produce raw
-    # JSON without the ``<json>``/```json``` wrapper their system prompt
-    # asked for. Fall back to (a) parsing the whole response as a single
-    # JSON object, then (b) walk the response and let JSONDecoder.raw_decode
-    # find each balanced ``{...}`` independently. The earlier greedy regex
-    # ``\{.*\}`` would join an ``{example}`` and an ``{answer}`` into one
-    # malformed concatenation; raw_decode handles each in isolation.
+    # Reasoning models routinely produce raw JSON without the
+    # ``<json>``/```json``` wrapper. Fall back to (a) parsing the whole
+    # response as a single JSON object, then (b) walking the response with
+    # ``JSONDecoder.raw_decode`` to find each balanced ``{...}`` independently
+    # (avoids joining adjacent JSON objects into one malformed concatenation).
     if not extracted_jsons:
         # BOM-tolerant strip so a leading ``﻿`` from some endpoints
         # does not poison the first ``json.loads``.

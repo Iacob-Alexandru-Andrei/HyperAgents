@@ -128,12 +128,8 @@ def build_container(
     Build the Docker image with proxy and host networking, then run it interactively.
     """
     try:
-        # F2e: env-var-driven proxy. The original initial-commit hardcoded
-        # ``http://fwdproxy:8080`` (Meta-internal); on any other host that
-        # proxy is unreachable so ``apt-get update`` inside the build returns
-        # exit 100. Honor the host's proxy env vars when set; otherwise pass
-        # nothing and let docker's host networking reach the package mirrors
-        # directly.
+        # Honor the host's proxy env vars when set; otherwise pass nothing and
+        # let docker's host networking reach the package mirrors directly.
         proxy_env: dict[str, str] = {}
         for build_key, *env_keys in (
             ("https_proxy", "https_proxy", "HTTPS_PROXY"),
@@ -289,22 +285,18 @@ def build_container(
             "network_mode": "host",
             "volumes": volumes,
             "environment": {
-                # F2i (recursive-scientist deviation): alias ``NVIDIA_API_KEY``
-                # to ``OPENAI_API_KEY`` here so the host's ``experiments/run.py``
-                # never has to write the parent process's ``os.environ``
-                # (rs.no-os-environ-anywhere absolute rule). The in-container
-                # litellm wrapper at ``hyperagents/agent/llm.py`` still reads
-                # ``OPENAI_API_KEY`` exclusively; the alias is scoped to the
-                # container's environment dict only.
+                # Alias ``NVIDIA_API_KEY`` to ``OPENAI_API_KEY`` for the
+                # container's environment only; the in-container litellm
+                # wrapper reads ``OPENAI_API_KEY`` exclusively.
                 "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY")
                 or os.environ.get("NVIDIA_API_KEY", ""),
             },
             "command": "tail -f /dev/null",
         }
 
-        # F2g (recursive-scientist Tier-2 cost proxy): when enabled, switch
-        # off host networking and confine the container to a custom bridge
-        # that resolves ``proxy`` to the bridge gateway.
+        # When the cost proxy is enabled, switch off host networking and
+        # confine the container to a custom bridge that resolves ``proxy`` to
+        # the bridge gateway.
         _apply_cost_proxy_network_lockdown(
             client,
             run_kwargs,
@@ -725,23 +717,22 @@ def cleanup_container(container, verbose=True):
         )
 
 
-# F2g: recursive-scientist Tier-2 cost-enforcing egress proxy.
+# Cost-enforcing egress proxy network helpers.
 #
-# When the cost proxy is enabled, this hook rewrites ``run_kwargs`` to:
+# When the cost proxy is enabled, ``_apply_cost_proxy_network_lockdown``
+# rewrites ``run_kwargs`` to:
 #
-# 1. Drop ``network_mode="host"`` and join the container to a per-run
-#    custom bridge network. The bridge is reused across expansions of
-#    the same run so we don't churn through docker-network slots.
-# 2. Add ``extra_hosts={"proxy": <host_ip>}`` so the in-container
-#    catalog's ``@http://proxy:<port>/v1`` entries resolve to the
-#    proxy listener on the host. We use the explicit IP rather than
-#    ``host.docker.internal`` because Linux Docker historically did
-#    not enable that name; explicitly mapping it works on every
-#    runtime we support.
+# 1. Drop ``network_mode="host"`` and join the container to a per-run custom
+#    bridge network. The bridge is reused across expansions of the same run
+#    so we don't churn through docker-network slots.
+# 2. Add ``extra_hosts={"proxy": <gateway_ip>}`` so the in-container catalog's
+#    ``@http://proxy:<port>/v1`` entries resolve to the proxy listener on the
+#    host via the bridge gateway IP (explicit IP rather than
+#    ``host.docker.internal``, which is not enabled on Linux Docker).
 #
 # Default behavior is unchanged when disabled: the container keeps host
-# networking and any catalog ``@<base_url>`` resolves directly to the
-# upstream provider.
+# networking and any catalog ``@<base_url>`` resolves directly to the upstream
+# provider.
 _DEFAULT_COST_PROXY_NETWORK = "rs-cost-proxy"
 _COST_PROXY_NETWORK_LOCK = threading.Lock()
 
@@ -755,23 +746,20 @@ def _apply_cost_proxy_network_lockdown(
     upstream_hostnames=None,
     verbose=True,
 ):
-    """F2j / F2o (recursive-scientist deviation): attach container to the cost-proxy
-    internal bridge and point ``extra_hosts.proxy`` at the **bridge gateway IP**
-    (the host's interface on the bridge), NOT the host's external IP.
+    """Attach the container to the cost-proxy internal bridge and point
+    ``extra_hosts.proxy`` at the bridge gateway IP.
 
-    ``internal=True`` bridges have no route to the host's external IP — only the
-    bridge gateway (e.g. ``172.18.0.1``) is reachable from attached containers.
+    ``internal=True`` bridges have no route to the host's external IP -- only
+    the bridge gateway (e.g. ``172.18.0.1``) is reachable from attached
+    containers, so the gateway IP is the proxy's reachable address.
 
-    F2o (proxy mandatory + DNS root-cause fix): when ``upstream_hostnames`` is
-    provided, EACH upstream hostname (e.g. ``inference-api.nvidia.com``) is
-    ALSO mapped to the bridge gateway in ``extra_hosts``. This is
-    defense-in-depth for the catalog rewrite + meta-agent ``--model`` rewrite:
-    even if a future code path forgets to swap ``@<url>`` for the proxy
-    base URL, the in-container DNS still resolves the public hostname to
-    the gateway. The connect on port 443 then fails fast with "connection
-    refused" instead of hanging on a 30 s DNS timeout. The proxy itself
-    listens on a non-443 port, so this is purely a fail-fast safety net,
-    not an authorization bypass.
+    When ``upstream_hostnames`` is provided, each upstream hostname (e.g.
+    ``inference-api.nvidia.com``) is also mapped to the bridge gateway in
+    ``extra_hosts``. This is defense-in-depth: even if a code path forgets to
+    swap ``@<url>`` for the proxy base URL, in-container DNS resolves the
+    public hostname to the gateway and the connect on port 443 fails fast
+    instead of hanging on a 30 s DNS timeout. The proxy listens on a non-443
+    port, so this is a fail-fast safety net, not an authorization bypass.
     """
     if not enabled:
         return
@@ -811,16 +799,12 @@ def _apply_cost_proxy_network_lockdown(
 def _ensure_cost_proxy_network(client, network_name, *, verbose=True):
     """Create the custom internal bridge network if missing; idempotent.
 
-    Plan-item #2 lockdown: ``internal=True`` drops the network's outbound
-    NAT so containers attached to it cannot reach the public internet
-    directly -- only the bridge gateway, where the host-bound proxy
-    listens, is reachable. The catalog rewrite still names ``proxy`` as
-    the upstream; the network-level confinement is the second layer that
-    prevents a malicious meta-agent from bypassing the proxy by editing
-    catalog model strings to point at a public IP, shelling out to
-    ``curl https://api.openai.com``, or otherwise routing around the
-    catalog. ``internal=True`` is silently honored by docker on both
-    Linux and Podman.
+    ``internal=True`` drops the network's outbound NAT so containers attached
+    to it cannot reach the public internet directly -- only the bridge
+    gateway, where the host-bound proxy listens, is reachable. This is the
+    network-level confinement that prevents bypassing the proxy by editing
+    catalog model strings or shelling out to public URLs. ``internal=True``
+    is honored by docker on both Linux and Podman.
     """
     with _COST_PROXY_NETWORK_LOCK:
         try:

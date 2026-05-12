@@ -103,11 +103,7 @@ def get_response_from_llm(
     if "gpt-5" in litellm_model:
         completion_kwargs["max_completion_tokens"] = max_tokens
     else:
-        # Claude Haiku has a 4096 token limit. (Nemotron 3 Super was previously
-        # capped here too on the strength of the nvidia-inference skill, but
-        # the live API actually allows 131072 total context for super-v3 /
-        # super-preview / super-rc-nim, and 1M for the long-ctx variant — the
-        # cap was over-conservative and crashed the writer mid-draft.)
+        # Claude Haiku has a 4096 token limit.
         if "claude-3-haiku" in litellm_model:
             completion_kwargs["max_tokens"] = min(max_tokens, 4096)
         else:

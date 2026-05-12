@@ -39,11 +39,11 @@ Task input:
 
 {output_format}"""
 
-        # F2k: bounded retry on parse failure. Up to MAX_PARSE_RETRIES calls
-        # total; each retry sends a flat corrective re-prompt that restates
-        # the required format. History accumulates across attempts so the
-        # model sees its own bad output. On exhaustion, fall through to the
-        # sentinel ``"None"`` that downstream eval code already handles.
+        # Bounded retry on parse failure: up to MAX_PARSE_RETRIES calls total;
+        # each retry sends a corrective re-prompt that restates the required
+        # format. History accumulates across attempts so the model sees its own
+        # bad output. On exhaustion, fall through to the sentinel ``"None"``
+        # that downstream eval code already handles.
         new_msg_history = []
         current_instruction = instruction
         prediction = "None"

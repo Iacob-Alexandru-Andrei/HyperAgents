@@ -1,18 +1,17 @@
-"""F-class meta-agent tool for one-shot LLM calls to alternate models.
+"""Meta-agent tool for one-shot LLM calls to alternate models.
 
-Tokens in, tokens out. No tools, no chat history, no recursion. Used by
-the meta-agent to delegate self-contained work (summaries, drafts, code
-generation) to a model picked from the catalog -- without polluting its
-own conversation context.
+Tokens in, tokens out. No tools, no chat history, no recursion. Used by the
+meta-agent to delegate self-contained work (summaries, drafts, code
+generation) to a model picked from the catalog -- without polluting its own
+conversation context.
 
-Bounds enforcement: the catalog is injected at load time by
+The catalog is injected at load time by
 ``hyperagents/agent/tools/__init__.py:load_tools`` via ``functools.partial``,
-so this tool's ``tool_function`` always receives the validated catalog
-list. ``id`` and ``effort`` are validated against the catalog before
-the underlying ``get_response_from_llm`` call; on violation, raise
-``ValueError`` so ``process_tool_call`` (in
-``hyperagents/agent/llm_withtools.py``) folds the error into the
-meta-agent's chat as a tool-output message it can recover from.
+so ``tool_function`` always receives the validated catalog list. ``id`` and
+``effort`` are validated against the catalog before the underlying
+``get_response_from_llm`` call; on violation, ``ValueError`` is raised so
+``process_tool_call`` folds the error into the meta-agent's chat as a
+tool-output message it can recover from.
 """
 
 

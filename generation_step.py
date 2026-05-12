@@ -50,20 +50,11 @@ def _container_budget_status_path(budget_status_path):
 
 
 def _rewrite_model_for_proxy(model, cost_proxy_base_url):
-    """F2o (recursive-scientist deviation): rewrite a model string's ``@<url>``
-    suffix to point at the cost proxy instead of the public upstream.
+    """Rewrite a model string's ``@<url>`` suffix to point at the cost proxy.
 
-    The catalog (``model_catalog.json``) is rewritten by the host's
-    ``rewrite_catalog_for_proxy`` before the container reads it, but the
-    meta-agent / task-agent CLIs receive ``--model`` as a separate
-    argument that historically carried the raw upstream URL. Containers
-    attached to the cost-proxy ``internal=True`` bridge cannot DNS-resolve
-    the public hostname, so an un-rewritten ``--model`` arg used to hang
-    on connect.
-
-    This helper is the host-side rewrite for that path. ``cost_proxy_base_url``
-    is the bridge-internal URL (e.g. ``http://proxy:9100/v1``); model
-    strings without an ``@<url>`` suffix pass through unchanged.
+    ``cost_proxy_base_url`` is the bridge-internal URL (e.g.
+    ``http://proxy:9100/v1``); model strings without an ``@<url>`` suffix pass
+    through unchanged.
     """
     if not cost_proxy_base_url or not model or "@" not in model:
         return model
@@ -155,13 +146,10 @@ def eval_produced_agent(
     splits=None,
     budget_status_path=None,
 ):
-    # F2c (recursive-scientist deviation): when ``splits`` is supplied
-    # (a non-None list[str]), iterate over exactly those splits instead
-    # of consulting the process-global ``get_domain_splits``. The host
-    # extension layer drives the train/val/test split selection through
-    # this real parameter so concurrent ``run_generation_step`` calls
-    # with different splits never race on a global lookup. Default
-    # behaviour (``splits=None``) is unchanged.
+    # When ``splits`` is supplied (a non-None list[str]), iterate over exactly
+    # those splits; otherwise fall back to ``get_domain_splits``. The explicit
+    # parameter lets concurrent callers with different splits avoid racing on
+    # the process-global lookup.
     if splits is None:
         splits = get_domain_splits(domain, eval_test=eval_test)
     for split in splits:  # pyright: ignore
@@ -369,19 +357,14 @@ def run_generation_step(
     ``produce_patch=False`` is a measurement pass (val/test/cross-eval):
     it applies the gen's full patch chain, runs eval, but does NOT
     touch ``model_patch.diff``."""
-    # Per-role model routing: the legacy ``model`` keyword is the uniform
-    # fallback (still required by the polyglot harness path). ``meta_agent_model``
-    # overrides the meta-agent invocation only; ``task_agent_models`` is a
-    # per-domain map for the task-agent eval calls. Either path falls back to
-    # ``model`` when its specific entry is missing.
-    #
-    # ``reasoning_effort`` mirrors the per-role model shape: a uniform
-    # ``reasoning_effort`` is applied to both the meta-agent and every task-
-    # agent path; ``meta_agent_reasoning_effort`` and
-    # ``task_agent_reasoning_efforts`` (per-domain map) override the uniform
-    # value for their specific call site. ``None`` means "do not pass the
-    # parameter through" -- downstream agent.llm silently drops it for models
-    # that do not document support for it.
+    # Per-role model routing: ``model`` is the uniform fallback (required by
+    # the polyglot harness path). ``meta_agent_model`` overrides the meta-agent
+    # invocation only; ``task_agent_models`` is a per-domain map for task-agent
+    # eval calls. Either path falls back to ``model`` when its specific entry
+    # is missing. ``reasoning_effort`` mirrors this shape: a uniform value
+    # applies to all calls; ``meta_agent_reasoning_effort`` and
+    # ``task_agent_reasoning_efforts`` override per call site. ``None`` means
+    # "do not pass the parameter through".
     if model is None and meta_agent_model is None and not task_agent_models:
         raise TypeError(
             "run_generation_step requires `model=`, `meta_agent_model=`, or `task_agent_models=`"
@@ -394,13 +377,11 @@ def run_generation_step(
         else reasoning_effort
     )
     _task_agent_reasoning_efforts = dict(task_agent_reasoning_efforts or {})
-    # F2o (recursive-scientist deviation): when the cost proxy is enabled,
-    # rewrite every ``--model`` arg's ``@<url>`` suffix to point at the
-    # bridge-internal proxy URL (``http://proxy:<port>/v1``). The catalog
+    # When the cost proxy is enabled, rewrite every ``--model`` arg's
+    # ``@<url>`` suffix to point at the bridge-internal proxy URL. The catalog
     # is rewritten separately by ``rewrite_catalog_for_proxy``; the CLI
-    # ``--model`` args are an independent channel that used to leak the
-    # raw upstream URL and trigger a DNS-resolution hang inside the
-    # ``internal=True`` cost-proxy bridge.
+    # ``--model`` args are an independent channel and must be rewritten here so
+    # the container can resolve the proxy hostname over the internal bridge.
     cost_proxy_upstream_hostnames = ()
     if cost_proxy_enabled and cost_proxy_base_url:
         # Collect upstream hostnames BEFORE rewriting so the lockdown can
@@ -468,24 +449,14 @@ def run_generation_step(
 
         # Apply all lineage diffs
         patch_files = get_patch_files(output_dir, parent_genid) if parent_patch_files is None else parent_patch_files
-        # Measurement passes (``produce_patch=False``) apply patches to set
-        # up the workspace state but must NOT mutate the canonical
-        # ``prev_patch_files`` for the gen -- the train pass already
-        # recorded the chain, and overwriting it here would put the
-        # gen's own patch into ``prev_patch_files`` and create
-        # duplicate entries that break later ``patch -p1`` replay.
-        #
-        # For producer passes (train), the host passes ``parent_patch_files``
-        # = ``get_patch_files(node.id) = prev + curr`` from the prior
-        # meta-agent step. ``curr`` at that point already contains the
-        # gen's OWN patch path. We must apply the full chain to set up
-        # the workspace (parent lineage + self's code edits) but should
-        # NOT record self's patch in ``prev_patch_files`` -- self belongs
-        # in ``curr`` and adding it to prev double-counts. Without this
-        # dedupe, downstream consumers see ``prev + curr = [parent, self, self]``
-        # and the second ``patch -p1`` of self fails with
-        # "file already exists" (the first apply already created the
-        # lineage subtree).
+        # Measurement passes (``produce_patch=False``) apply patches to set up
+        # the workspace but must NOT mutate ``prev_patch_files`` -- the train
+        # pass already recorded the canonical chain. For producer (train)
+        # passes, ``parent_patch_files`` already contains the gen's own patch
+        # path (passed as ``prev + curr``); apply the full chain to set up the
+        # workspace but exclude self from ``prev_patch_files`` (self belongs in
+        # ``curr``). Without this dedupe, ``prev + curr = [parent, self, self]``
+        # and the second ``patch -p1`` of self fails with "file already exists".
         self_patch_path = os.path.normpath(
             os.path.join(gen_output_dir, "agent_output", "model_patch.diff")
         )
@@ -549,12 +520,9 @@ def run_generation_step(
             exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
             log_container_output(exec_result)
             metadata["parent_agent_success"] = exec_result.exit_code == 0
-            # F2i (recursive-scientist Tier 3 two-axis kill): persist the
-            # exit code so the host can distinguish a wall-clock kill
-            # (the in-container ``timeout 21600`` shell wrapper exits 124)
-            # from a clean-exit ``parent_agent_success=False`` (e.g. the
-            # meta-agent gave up on its own). The host writes
-            # ``killed_by="time"`` when this is 124.
+            # Persist the meta-agent exit code so the host can distinguish a
+            # wall-clock kill (the in-container ``timeout 21600`` wrapper exits
+            # 124) from a clean-exit ``parent_agent_success=False``.
             metadata["meta_agent_exit_code"] = int(exec_result.exit_code or 0)
 
             # Copy container outputs to local
@@ -682,13 +650,10 @@ def run_generation_step(
             ]
         )
         metadata["valid_parent"] = metadata["run_eval"] and (eval_successful or meta_patch_files is not None)
-        # Measurement passes (``produce_patch=False``) must not overwrite
-        # the gen's canonical metadata.json -- the train pass already
-        # wrote it with the authoritative ``prev_patch_files`` /
-        # ``curr_patch_files`` chain. A measurement pass that re-writes
-        # would clobber the chain (its local ``metadata`` dict starts
-        # fresh on entry to this function and only knows what was
-        # passed in, not what the train pass committed).
+        # Measurement passes must not overwrite the gen's canonical
+        # metadata.json -- the train pass already wrote it with the
+        # authoritative ``prev_patch_files`` / ``curr_patch_files`` chain, and
+        # the measurement pass's local ``metadata`` dict would clobber it.
         if produce_patch:
             with open(os.path.join(gen_output_dir, "metadata.json"), "w") as f:
                 json.dump(metadata, f, indent=4)
@@ -825,7 +790,7 @@ if __name__ == "__main__":
         nargs="+",
         default=None,
         choices=["train", "val", "test"],
-        help="F2c: explicit splits to evaluate (overrides get_domain_splits)",
+        help="Explicit splits to evaluate (overrides get_domain_splits)",
     )
     args = parser.parse_args()
 

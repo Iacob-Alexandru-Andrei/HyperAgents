@@ -27,11 +27,10 @@ class MetaAgent(AgentSystem):
             eval_path (str): The path to previously generated agents and their evaluation results.
             iterations_left (int, optional): The number of remaining iterations in which the meta agent will be invoked in future. Defaults to None.
         """
-        # F-class: load the model catalog written by the host before the
-        # container started (write_catalog_artifacts at run init). When the
-        # catalog is present, query_model is enabled with this list bound
-        # via functools.partial inside load_tools; when absent the tool
-        # advertises itself as disabled and refuses to fire.
+        # Load the model catalog written by the host before the container
+        # started. When the catalog is present, query_model is enabled with
+        # this list bound via functools.partial inside load_tools; when absent
+        # the tool advertises itself as disabled and refuses to fire.
         catalog_path = os.path.join(eval_path, "model_catalog.json")
         catalog = []
         if os.path.exists(catalog_path):
@@ -73,7 +72,7 @@ class MetaAgent(AgentSystem):
             "\n  - `agent_output/code_only_patch.diff` -- the code-only diff "
             "each predecessor produced (just the source-file edits the "
             "meta-agent made, no lineage data). Read this to see what "
-            "predecessors changed without wading through the F2l-rich "
+            "predecessors changed without wading through the full "
             "`model_patch.diff` (which also contains lineage snapshots: "
             "predictions.csv, chat histories, etc. -- all of which you "
             "already access directly under the per-ancestor "

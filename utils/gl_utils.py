@@ -347,10 +347,8 @@ def setup_initial_gen(
         "baselines",
         "domains",
     }
-    # F2d: keep ``Dockerfile`` and ``.dockerignore`` so ``docker_utils.build_image``
-    # (``client.images.build(path=repo_path, ...)``) can find them inside the
-    # cloned workspace. Excluding them caused the canary to fail with
-    # "Cannot locate specified Dockerfile: Dockerfile".
+    # Keep ``Dockerfile`` and ``.dockerignore`` (not in this set) so
+    # ``docker_utils.build_image`` can find them inside the cloned workspace.
     excluded_files = {
         "setup_initial.sh",
         "LICENSE.md",
