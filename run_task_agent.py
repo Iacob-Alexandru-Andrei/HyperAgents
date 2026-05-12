@@ -15,12 +15,27 @@ def main():
     parser.add_argument('--test_description', default=None, required=False, help='Description of how to test the repository')
     parser.add_argument('--language', default=None, required=False, help='Coding language of the repository')
     parser.add_argument('--model', required=True, help='LLM model to use')
+    parser.add_argument(
+        '--reasoning_effort',
+        type=str,
+        default=None,
+        choices=['low', 'medium', 'high'],
+        help='OpenAI-style reasoning_effort applied to every task-agent LLM call',
+    )
+    parser.add_argument(
+        '--budget_status_path',
+        type=str,
+        default=None,
+        help='Path to the live budget status markdown injected into every chat turn',
+    )
     args = parser.parse_args()
 
     # Process the repository
     agentic_system = TaskAgent(
         model=args.model,
         chat_history_file=args.chat_history_file,
+        reasoning_effort=args.reasoning_effort,
+        budget_status_path=args.budget_status_path,
     )
     inputs = {
         "domain": "polyglot",
