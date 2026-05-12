@@ -417,6 +417,16 @@ def chat_with_agent(
 
         # Call API
         input_msg = _budget_status_prefix(budget_status_path) + system_msg + msg
+        _INPUT_MSG_CAP = 32000
+        if len(input_msg) > _INPUT_MSG_CAP:
+            head_len = _INPUT_MSG_CAP // 2
+            tail_len = _INPUT_MSG_CAP - head_len
+            dropped = len(input_msg) - _INPUT_MSG_CAP
+            input_msg = (
+                input_msg[:head_len]
+                + f"\n...[{dropped} chars omitted from input_msg]...\n"
+                + input_msg[-tail_len:]
+            )
         new_msg_history = _maybe_compact_history(
             new_msg_history,
             input_msg,
