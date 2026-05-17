@@ -69,7 +69,7 @@ def tool_info(*, catalog=None):
                 },
                 "max_tokens": {
                     "type": "integer",
-                    "description": "Max response tokens (default 4096).",
+                    "description": "Max response tokens (default 32768).",
                 },
             },
             "required": ["prompt", "id"],
@@ -77,12 +77,12 @@ def tool_info(*, catalog=None):
     }
 
 
-def tool_function(prompt, id, effort=None, max_tokens=4096, *, catalog=None):
+def tool_function(prompt, id, effort=None, max_tokens=32768, *, catalog=None):
     catalog = list(catalog or [])
     if not catalog:
         raise ValueError("query_model is disabled: no model_catalog configured.")
     entry, model_str, eff = _resolve(catalog, id, effort)
-    cap = int(entry.get("max_output_tokens") or 4096)
+    cap = int(entry.get("max_output_tokens") or 32768)
     bounded_max_tokens = min(max(1, int(max_tokens)), cap)
     from agent.llm import get_response_from_llm
 

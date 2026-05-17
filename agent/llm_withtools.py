@@ -393,6 +393,7 @@ def chat_with_agent(
     budget_status_path=None,
     workspace_root=None,
     current_gen=None,
+    max_format_retries=1,  # F2d: cap formatting-retry passes per response
 ):
     get_response_fn = get_response_from_llm
     # Construct message
@@ -457,11 +458,26 @@ def chat_with_agent(
         # Tool use
         tool_uses = check_for_tool_uses(response)
         retry_tool_use = should_retry_tool_use(response, tool_uses)
+        format_retry_count = 0
         while tool_uses or retry_tool_use:
             # Check for max tool calls
             if max_tool_calls > 0 and num_tool_calls >= max_tool_calls:
                 logging("Error: Maximum number of tool calls reached.")
                 break
+            # F2d: cap formatting retries per response. A model that
+            # keeps emitting tool-use intent without parseable JSON
+            # would otherwise loop until max_tool_calls; instead we
+            # stop after `max_format_retries` corrective passes and
+            # let the caller surface whatever was produced.
+            if retry_tool_use and not tool_uses:
+                if format_retry_count >= max_format_retries:
+                    logging(
+                        f"Error: formatting retries exhausted "
+                        f"({format_retry_count}/{max_format_retries}); "
+                        f"breaking out of tool-call loop."
+                    )
+                    break
+                format_retry_count += 1
 
             tool_msgs = []
 

@@ -9,9 +9,15 @@ import json
 
 load_dotenv()
 
-MAX_TOKENS = 16384
+MAX_TOKENS = 32768
 
 litellm.drop_params=True
+# F2e: disable LiteLLM's built-in retries so the ``backoff`` decorator
+# below is the sole retry authority. Default num_retries=2 causes
+# thundering-herd amplification when many sibling threads share a
+# rate-limited upstream (NVIDIA Inference's AWS-WAF CPE_RateLimit_IP
+# returns 429 with no Retry-After).
+litellm.num_retries = 0
 
 # Models that accept the OpenAI-style ``reasoning_effort`` parameter
 # (low | medium | high). For other models, the param is dropped silently
@@ -48,6 +54,20 @@ def parse_openai_endpoint_model(model: str) -> tuple[str, dict[str, str]]:
     }
 
 
+# F2e: WAF-survivable retry policy.
+# - max_time 600 -> 3600s: AWS-WAF rate-rule windows are typically
+#   5-15 min; a 10-min retry budget can give up while WAF is still
+#   blocking. 1 hour comfortably covers the worst case observed on
+#   NVIDIA's free Inference SKU.
+# - max_value 60 -> 300s: ceiling on individual sleep between retries.
+#   60s tops out at four 60-second waits before max_time fires; 300s
+#   gives the bucket time to drain.
+# - jitter=backoff.full_jitter: uniform in [0, current_delay].
+#   Eliminates the thundering-herd at 1/2/4/8s that 16 sibling threads
+#   in the same container otherwise produce.
+# - BadRequestError and AuthenticationError DO NOT retry: 400s/401s
+#   are deterministic failures; burning the 1h retry budget on them is
+#   wasted lease budget.
 @backoff.on_exception(
     backoff.expo,
     (
@@ -61,14 +81,23 @@ def parse_openai_endpoint_model(model: str) -> tuple[str, dict[str, str]]:
         litellm.exceptions.InternalServerError,
         litellm.exceptions.ServiceUnavailableError,
     ),
-    max_time=600,
-    max_value=60,
+    max_time=3600,
+    max_value=300,
+    jitter=backoff.full_jitter,
+    giveup=lambda exc: isinstance(
+        exc,
+        (
+            litellm.exceptions.BadRequestError,
+            litellm.exceptions.AuthenticationError,
+        ),
+    ),
 )
 def get_response_from_llm(
     msg: str,
     model: str,
     temperature: float = 0.0,
     max_tokens: int = MAX_TOKENS,
+    max_continuation_rounds: int = 1,
     msg_history=None,
     reasoning_effort: str | None = None,
 ) -> Tuple[str, list, dict]:
@@ -129,11 +158,54 @@ def get_response_from_llm(
         reasoning = msg_obj.get('reasoning_content')
         if isinstance(reasoning, str) and reasoning.strip():
             response_text = reasoning
+    # F2d: continuation pass on output-cap truncation. When the model
+    # returns finish_reason=length we lost the tail of the response.
+    # Re-issue with the partial response stitched in plus a "continue"
+    # instruction; concatenate and check finish_reason again. Bounded
+    # at max_continuation_rounds=1 by default so a pathological loop
+    # can't run away; one continuation handles the common case
+    # (output slightly over the cap) without spending unbounded compute
+    # on a runaway generation. The meta-agent can override the bound
+    # per-call when it expects long structured output.
+    continuation_rounds = 0
+    while (
+        choice.get('finish_reason') == 'length'
+        and continuation_rounds < max_continuation_rounds
+    ):
+        continuation_rounds += 1
+        # Stitch: append assistant's partial, ask to continue verbatim.
+        cont_msgs = new_msg_history + [
+            {"role": "assistant", "content": response_text or ""},
+            {
+                "role": "user",
+                "content": (
+                    "Your previous response was cut off mid-output (you hit "
+                    "the max-tokens cap). Continue EXACTLY from where you "
+                    "stopped, in the same format, without repeating any "
+                    "tokens you already produced. Do not restart, do not "
+                    "summarize. Just continue."
+                ),
+            },
+        ]
+        cont_kwargs = dict(completion_kwargs)
+        cont_kwargs["messages"] = cont_msgs
+        response = litellm.completion(**cont_kwargs)
+        choice = response['choices'][0]  # pyright: ignore
+        msg_obj = choice['message']
+        chunk = msg_obj.get('content')
+        if not isinstance(chunk, str) or not chunk.strip():
+            chunk = msg_obj.get('reasoning_content') or ""
+        # Concatenate the chunk; the model is asked NOT to repeat the
+        # prefix, so naive concatenation is correct in the common case.
+        response_text = (response_text or "") + chunk
     if choice.get('finish_reason') == 'length':
         raise RuntimeError(
             f"truncated response from {litellm_model}: finish_reason=length "
+            f"after {continuation_rounds} continuation rounds "
             f"(max_tokens={completion_kwargs.get('max_tokens') or completion_kwargs.get('max_completion_tokens')}). "
-            f"Mid-output truncation corrupts JSON-wrapped predictions; raise the cap or shorten the prompt."
+            f"Output exceeds {max_continuation_rounds + 1}x the cap; "
+            f"shorten the prompt, split the task, or raise "
+            f"max_continuation_rounds for this call."
         )
     new_msg_history.append({"role": "assistant", "content": response_text})
 

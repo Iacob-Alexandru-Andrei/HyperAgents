@@ -100,4 +100,23 @@ TaskAgent.OUTPUT_FORMATS = {
         '}',
         "response",
     ),
+    "imo_grading": (
+        'You are grading an IMO solution. Use the problem, reference solution, grading '
+        'guidelines, and proposed solution to assign exactly one label.\n\n'
+        'Respond with one JSON block:\n'
+        '{\n'
+        '  "Grade": "incorrect" | "partial" | "almost" | "correct"\n'
+        '}\n'
+        'For "Grade", use only "incorrect", "partial", "almost", or "correct".',
+        "Grade",
+    ),
+    "imo_proof": (
+        'Solve the IMO problem rigorously. If you cannot find a complete solution, give '
+        'the strongest rigorous partial progress you can justify.\n\n'
+        'Respond with one JSON block:\n'
+        '{\n'
+        '  "response": "..."\n'
+        '}',
+        "response",
+    ),
 }
