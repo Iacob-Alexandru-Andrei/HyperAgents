@@ -147,6 +147,9 @@ def get_response_from_llm(
     if reasoning_effort and _supports_reasoning_effort(litellm_model):
         completion_kwargs["extra_body"] = {"reasoning_effort": reasoning_effort}
 
+    completion_kwargs.setdefault(
+        "timeout", int(os.environ.get("HYPERAGENTS_LLM_TIMEOUT_S", "300"))
+    )
     response = litellm.completion(**completion_kwargs)
     choice = response['choices'][0]  # pyright: ignore
     msg_obj = choice['message']
