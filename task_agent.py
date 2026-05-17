@@ -9,10 +9,12 @@ class TaskAgent(AgentSystem):
         chat_history_file='./outputs/chat_history.md',
         reasoning_effort=None,
         budget_status_path=None,
+        system_prompt_override=None,
     ):
         super().__init__(model=model, chat_history_file=chat_history_file)
         self.reasoning_effort = reasoning_effort
         self.budget_status_path = budget_status_path
+        self.system_prompt_override = system_prompt_override
 
     MAX_PARSE_RETRIES = 1
 
@@ -30,7 +32,26 @@ class TaskAgent(AgentSystem):
         """
         domain = inputs['domain']
         output_format, extract_field = self.OUTPUT_FORMATS.get(domain, ('Respond in JSON format with the following schema:\n<json>\n{\n    "response": ...\n}\n</json>', "response"))
-        instruction = f"""You are an agent.
+        # ``system_prompt_override``: when set (via recursive_scientist's
+        # ``RoleConfig.prompt_override`` registry), the role-specific baseline
+        # prompt replaces the generic "You are an agent." preamble. The
+        # per-domain ``output_format`` (which carries the parseable JSON
+        # contract the harness relies on) is preserved after it -- baselines
+        # like ``sakana_neurips_reviewer`` carry their own format block, but
+        # appending the harness's contract still guarantees the JSON shape
+        # downstream extraction looks for. ``extract_field`` is unchanged so
+        # extraction logic stays in sync with ``OUTPUT_FORMATS``.
+        if self.system_prompt_override:
+            instruction = f"""{self.system_prompt_override}
+
+Task input:
+```
+{inputs}
+```
+
+{output_format}"""
+        else:
+            instruction = f"""You are an agent.
 
 Task input:
 ```

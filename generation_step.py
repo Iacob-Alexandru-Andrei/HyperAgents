@@ -145,6 +145,7 @@ def eval_produced_agent(
     reasoning_effort=None,
     splits=None,
     budget_status_path=None,
+    system_prompt_override=None,
 ):
     # When ``splits`` is supplied (a non-None list[str]), iterate over exactly
     # those splits; otherwise fall back to ``get_domain_splits``. The explicit
@@ -183,6 +184,8 @@ def eval_produced_agent(
             command += ["--reasoning_effort", reasoning_effort]
         if budget_status_path:
             command += ["--budget_status_path", budget_status_path]
+        if system_prompt_override:
+            command += ["--system_prompt_override", system_prompt_override]
         exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
         log_container_output(exec_result)
         command = [
@@ -368,6 +371,7 @@ def run_generation_step(
     reasoning_effort=None,
     meta_agent_reasoning_effort=None,
     task_agent_reasoning_efforts=None,
+    task_agent_prompts=None,
     splits=None,
     cost_proxy_enabled=None,
     cost_proxy_network=None,
@@ -400,6 +404,7 @@ def run_generation_step(
         else reasoning_effort
     )
     _task_agent_reasoning_efforts = dict(task_agent_reasoning_efforts or {})
+    _task_agent_prompts = dict(task_agent_prompts or {})
     # When the cost proxy is enabled, rewrite every ``--model`` arg's
     # ``@<url>`` suffix to point at the bridge-internal proxy URL. The catalog
     # is rewritten separately by ``rewrite_catalog_for_proxy``; the CLI
@@ -587,6 +592,7 @@ def run_generation_step(
                     ),
                     splits=splits,
                     budget_status_path=container_budget_status_path,
+                    system_prompt_override=_task_agent_prompts.get(domain),
                 )
 
             # Small sample size evaluation for staged eval

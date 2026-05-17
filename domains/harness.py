@@ -35,24 +35,36 @@ def run_agent(
     question_id_col,
     reasoning_effort=None,
     budget_status_path=None,
+    system_prompt_override=None,
 ):
     question_id = row[question_id_col]
     chat_history_path = os.path.join(evals_folder, f"chat_history_{question_id}.md")
-    # ``reasoning_effort`` is forwarded only when the TaskAgent constructor
-    # advertises it (the upstream upstream-base TaskAgent class does, but
-    # third-party patched versions in the meta-agent's diff stream may not).
+    # ``reasoning_effort`` and ``system_prompt_override`` are forwarded only when
+    # the TaskAgent constructor advertises them (the upstream upstream-base
+    # TaskAgent class does, but third-party patched versions in the meta-agent's
+    # diff stream may not). Each kwarg falls back independently to the previous
+    # constructor shape on TypeError so older diffed task_agent.py files keep
+    # working without the new optional arg.
     agent_kwargs = {"model": model, "chat_history_file": chat_history_path}
     try:
         agent = TaskAgent(
             **agent_kwargs,
             reasoning_effort=reasoning_effort,
             budget_status_path=budget_status_path,
+            system_prompt_override=system_prompt_override,
         )
     except TypeError:
         try:
-            agent = TaskAgent(**agent_kwargs, reasoning_effort=reasoning_effort)
+            agent = TaskAgent(
+                **agent_kwargs,
+                reasoning_effort=reasoning_effort,
+                budget_status_path=budget_status_path,
+            )
         except TypeError:
-            agent = TaskAgent(**agent_kwargs)
+            try:
+                agent = TaskAgent(**agent_kwargs, reasoning_effort=reasoning_effort)
+            except TypeError:
+                agent = TaskAgent(**agent_kwargs)
     inputs = format_input_dict(row)
     prediction, _ = agent.forward(inputs)
     return prediction
@@ -97,6 +109,7 @@ def harness(
     proofs_dname=None,
     reasoning_effort=None,
     budget_status_path=None,
+    system_prompt_override=None,
 ):
     # Dynamically import functions based on the domain
     utils_prefix = domain.split("_", 1)[1] + "_" if domain.startswith("imo_") else ""
@@ -173,6 +186,7 @@ def harness(
                         question_id_col,
                         reasoning_effort,
                         budget_status_path,
+                        system_prompt_override,
                     ),
                 )
             )
@@ -265,6 +279,12 @@ if __name__ == "__main__":
         default=None,
         help="Path to the live budget status markdown injected into every chat turn",
     )
+    parser.add_argument(
+        "--system_prompt_override",
+        type=str,
+        default=None,
+        help="Optional named-baseline system prompt (replaces 'You are an agent.')",
+    )
     args = parser.parse_args()
 
     domain = args.domain
@@ -293,6 +313,7 @@ if __name__ == "__main__":
             proofs_dname=args.proofs_dname,
             reasoning_effort=args.reasoning_effort,
             budget_status_path=args.budget_status_path,
+            system_prompt_override=args.system_prompt_override,
         )
 
     # Balrog game domains

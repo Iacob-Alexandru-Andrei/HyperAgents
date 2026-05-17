@@ -28,6 +28,12 @@ def main():
         default=None,
         help='Path to the live budget status markdown injected into every chat turn',
     )
+    parser.add_argument(
+        '--system_prompt_override',
+        type=str,
+        default=None,
+        help='Optional named-baseline system prompt (replaces "You are an agent.")',
+    )
     args = parser.parse_args()
 
     # Process the repository
@@ -36,6 +42,7 @@ def main():
         chat_history_file=args.chat_history_file,
         reasoning_effort=args.reasoning_effort,
         budget_status_path=args.budget_status_path,
+        system_prompt_override=args.system_prompt_override,
     )
     inputs = {
         "domain": "polyglot",
