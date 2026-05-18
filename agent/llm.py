@@ -1,5 +1,6 @@
 import backoff
 import os
+import socket
 from typing import Tuple
 import requests
 import litellm
@@ -8,6 +9,8 @@ from dotenv import load_dotenv
 import json
 
 load_dotenv()
+
+socket.setdefaulttimeout(int(os.environ.get("HYPERAGENTS_LLM_TIMEOUT_S", "300")))
 
 MAX_TOKENS = 32768
 
