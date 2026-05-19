@@ -57,20 +57,16 @@ def parse_openai_endpoint_model(model: str) -> tuple[str, dict[str, str]]:
     }
 
 
-# F2e: WAF-survivable retry policy.
-# - max_time 600 -> 3600s: AWS-WAF rate-rule windows are typically
-#   5-15 min; a 10-min retry budget can give up while WAF is still
-#   blocking. 1 hour comfortably covers the worst case observed on
-#   NVIDIA's free Inference SKU.
-# - max_value 60 -> 300s: ceiling on individual sleep between retries.
-#   60s tops out at four 60-second waits before max_time fires; 300s
-#   gives the bucket time to drain.
+# F2e: WAF- and 504-storm-survivable retry policy.
+# - max_time default 21600s (6h), env HYPERAGENTS_LLM_RETRY_BUDGET_S.
+#   NVIDIA Inference 504 outages can outlast the prior 1h budget;
+#   6h covers observed worst cases without giving up on transient infra.
+# - max_value default 600s, env HYPERAGENTS_LLM_RETRY_MAX_WAIT_S.
+#   10-min sleep ceiling lets the bucket drain across the 6h window.
 # - jitter=backoff.full_jitter: uniform in [0, current_delay].
-#   Eliminates the thundering-herd at 1/2/4/8s that 16 sibling threads
-#   in the same container otherwise produce.
+#   Eliminates thundering-herd at 1/2/4/8s with 16 sibling threads.
 # - BadRequestError and AuthenticationError DO NOT retry: 400s/401s
-#   are deterministic failures; burning the 1h retry budget on them is
-#   wasted lease budget.
+#   are deterministic failures; burning the retry budget is wasted lease.
 @backoff.on_exception(
     backoff.expo,
     (
@@ -84,8 +80,8 @@ def parse_openai_endpoint_model(model: str) -> tuple[str, dict[str, str]]:
         litellm.exceptions.InternalServerError,
         litellm.exceptions.ServiceUnavailableError,
     ),
-    max_time=3600,
-    max_value=300,
+    max_time=int(os.environ.get("HYPERAGENTS_LLM_RETRY_BUDGET_S", "21600")),
+    max_value=int(os.environ.get("HYPERAGENTS_LLM_RETRY_MAX_WAIT_S", "600")),
     jitter=backoff.full_jitter,
     giveup=lambda exc: isinstance(
         exc,
