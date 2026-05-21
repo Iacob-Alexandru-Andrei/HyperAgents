@@ -17,6 +17,9 @@ _COMPRESSION_RATIO_FALLBACK = 3.0
 # under-report of ``cumulative_chat_chars`` could otherwise push the ratio
 # toward 1.0 and make the compactor under-estimate token cost.
 _COMPRESSION_RATIO_FLOOR = 2.0
+_DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS = int(
+    os.environ.get("HYPERAGENTS_RUNTIME_MAX_OUTPUT_TOKENS", "32768")
+)
 
 
 _COMPACTION_SUMMARY_PROMPT = (
@@ -108,7 +111,7 @@ def _estimate_tokens(msg_history, input_msg, *, budget_status_path=None):
     return int(total_chars / _COMPRESSION_RATIO_FALLBACK)
 
 
-def _resolve_compaction_config(catalog, model):
+def _resolve_compaction_config(catalog, model, max_output_tokens=None):
     """Return (enabled, soft_cap, summary_max_tok) for the active model.
 
     Soft cap is derived from the catalog entry (context_window_tokens,
@@ -135,7 +138,11 @@ def _resolve_compaction_config(catalog, model):
             entry = e
             break
     context_window = int((entry or {}).get("context_window_tokens", 128000))
-    max_output = int((entry or {}).get("max_output_tokens", 4096))
+    catalog_max_output = int((entry or {}).get("max_output_tokens", 4096))
+    if max_output_tokens is None:
+        max_output = catalog_max_output
+    else:
+        max_output = max(catalog_max_output, int(max_output_tokens))
     soft_cap = int((context_window - max_output - safety_margin_tok) * soft_fraction)
     return enabled, soft_cap, summary_max_tok
 
@@ -168,6 +175,7 @@ def _maybe_compact_history(
     logging,
     summarize_fn=None,
     budget_status_path=None,
+    max_output_tokens=None,
 ):
     """Compact ``msg_history`` when the estimated token count exceeds the
     model's soft cap. Returns the (possibly new) msg_history list.
@@ -190,7 +198,9 @@ def _maybe_compact_history(
     ``<COMPACTED HISTORY>`` marker lands in the persisted transcript on the
     next ``get_response_from_llm`` call.
     """
-    enabled, soft_cap, summary_max_tok = _resolve_compaction_config(catalog, model)
+    enabled, soft_cap, summary_max_tok = _resolve_compaction_config(
+        catalog, model, max_output_tokens=max_output_tokens
+    )
     if not enabled:
         return msg_history
     if not msg_history:
@@ -443,6 +453,7 @@ def chat_with_agent(
             reasoning_effort=reasoning_effort,
             logging=logging,
             budget_status_path=budget_status_path,
+            max_output_tokens=_DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS,
         )
         compacted_last_round = new_msg_history is not prev_history_obj
         logging(f"Input: {repr(input_msg)}")
@@ -536,6 +547,7 @@ def chat_with_agent(
                 reasoning_effort=reasoning_effort,
                 logging=logging,
                 budget_status_path=budget_status_path,
+                max_output_tokens=_DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS,
             )
             compacted_last_round = new_msg_history is not prev_history_obj
             logging(f"Input: {repr(input_msg)}")
