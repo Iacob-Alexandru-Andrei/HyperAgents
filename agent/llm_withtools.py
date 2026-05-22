@@ -20,6 +20,9 @@ _COMPRESSION_RATIO_FLOOR = 2.0
 _DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS = int(
     os.environ.get("HYPERAGENTS_RUNTIME_MAX_OUTPUT_TOKENS", "32768")
 )
+_DEFAULT_MAX_CONTINUATION_ROUNDS = int(
+    os.environ.get("HYPERAGENTS_LLM_MAX_CONTINUATION_ROUNDS", "1")
+)
 
 
 _COMPACTION_SUMMARY_PROMPT = (
@@ -404,6 +407,7 @@ def chat_with_agent(
     workspace_root=None,
     current_gen=None,
     max_format_retries=1,  # F2d: cap formatting-retry passes per response
+    extra_body=None,
 ):
     get_response_fn = get_response_from_llm
     # Construct message
@@ -462,6 +466,9 @@ def chat_with_agent(
             model=model,
             msg_history=new_msg_history,
             reasoning_effort=reasoning_effort,
+            max_tokens=_DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS,
+            max_continuation_rounds=_DEFAULT_MAX_CONTINUATION_ROUNDS,
+            extra_body=extra_body,
         )
         logging(f"Output: {repr(response)}")
         # logging(f"Info: {repr(info)}")
@@ -556,6 +563,9 @@ def chat_with_agent(
                 model=model,
                 msg_history=new_msg_history,
                 reasoning_effort=reasoning_effort,
+                max_tokens=_DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS,
+                max_continuation_rounds=_DEFAULT_MAX_CONTINUATION_ROUNDS,
+                extra_body=extra_body,
             )
             logging(f"Output: {repr(response)}")
             # logging(f"Info: {repr(info)}")

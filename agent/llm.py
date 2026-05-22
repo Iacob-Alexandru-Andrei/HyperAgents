@@ -99,6 +99,7 @@ def get_response_from_llm(
     max_continuation_rounds: int = 1,
     msg_history=None,
     reasoning_effort: str | None = None,
+    extra_body: dict | None = None,
 ) -> Tuple[str, list, dict]:
     if msg_history is None:
         msg_history = []
@@ -143,8 +144,11 @@ def get_response_from_llm(
     # ``reasoning_effort`` for models that document support for it; for
     # everything else the kwarg is silently a no-op so callers can pass it
     # uniformly across a heterogeneous fleet.
+    request_extra_body = dict(extra_body or {})
     if reasoning_effort and _supports_reasoning_effort(litellm_model):
-        completion_kwargs["extra_body"] = {"reasoning_effort": reasoning_effort}
+        request_extra_body.setdefault("reasoning_effort", reasoning_effort)
+    if request_extra_body:
+        completion_kwargs["extra_body"] = request_extra_body
 
     completion_kwargs.setdefault(
         "timeout", int(os.environ.get("HYPERAGENTS_LLM_TIMEOUT_S", "300"))

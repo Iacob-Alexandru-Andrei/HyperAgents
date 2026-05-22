@@ -15,6 +15,13 @@ from docker.types import Mount
 from utils.constants import REPO_NAME
 
 BUDGET_STATUS_CONTAINER_DIR = "/rqgm_budget"
+_FORWARDED_RUNTIME_ENV = (
+    "HYPERAGENTS_LLM_TIMEOUT_S",
+    "HYPERAGENTS_LLM_RETRY_BUDGET_S",
+    "HYPERAGENTS_LLM_RETRY_MAX_WAIT_S",
+    "HYPERAGENTS_LLM_MAX_CONTINUATION_ROUNDS",
+    "HYPERAGENTS_RUNTIME_MAX_OUTPUT_TOKENS",
+)
 
 
 def _budget_status_volume(budget_status_path):
@@ -24,6 +31,21 @@ def _budget_status_volume(budget_status_path):
         os.path.abspath(os.path.dirname(budget_status_path) or "."),
         BUDGET_STATUS_CONTAINER_DIR,
     )
+
+
+def _container_runtime_environment():
+    environment = {
+        # Alias ``NVIDIA_API_KEY`` to ``OPENAI_API_KEY`` for the
+        # container's environment only; the in-container litellm
+        # wrapper reads ``OPENAI_API_KEY`` exclusively.
+        "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("NVIDIA_API_KEY", ""),
+    }
+    for key in _FORWARDED_RUNTIME_ENV:
+        value = os.environ.get(key)
+        if value:
+            environment[key] = value
+    return environment
 
 warnings.filterwarnings(
     "ignore",
@@ -284,13 +306,7 @@ def build_container(
             "stdin_open": True,
             "network_mode": "host",
             "volumes": volumes,
-            "environment": {
-                # Alias ``NVIDIA_API_KEY`` to ``OPENAI_API_KEY`` for the
-                # container's environment only; the in-container litellm
-                # wrapper reads ``OPENAI_API_KEY`` exclusively.
-                "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY")
-                or os.environ.get("NVIDIA_API_KEY", ""),
-            },
+            "environment": _container_runtime_environment(),
             "command": "tail -f /dev/null",
         }
 
