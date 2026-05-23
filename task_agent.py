@@ -1,26 +1,6 @@
 from agent.base_agent import AgentSystem
-from agent.llm import get_response_from_llm
 from agent.llm_withtools import chat_with_agent
 from utils.common import extract_jsons
-
-IMO_PROOF_DEFAULT_PROMPT = (
-    "You are given a math problem. Prove the statement rigorously. "
-    "If you cannot find a complete proof, give the strongest rigorous "
-    "partial result you can. Be concise; stay under 1200 words. "
-    "Do not include hidden reasoning or exploratory scratch work.\n\n"
-    "Output your final proof between <SOLUTION> and </SOLUTION> tags."
-)
-IMO_PROOF_MAX_TOKENS = 4096
-NEMOTRON_NO_THINKING_EXTRA_BODY = {"chat_template_kwargs": {"enable_thinking": False}}
-
-
-def _solution_wrapped(text):
-    stripped = text.strip() or "None"
-    if "<SOLUTION>" not in stripped:
-        stripped = f"<SOLUTION>\n{stripped}"
-    if "</SOLUTION>" not in stripped:
-        stripped = f"{stripped}\n</SOLUTION>"
-    return stripped
 
 
 class TaskAgent(AgentSystem):
@@ -52,8 +32,6 @@ class TaskAgent(AgentSystem):
                 - new_msg_history (list): A list of messages representing the message history of the interaction.
         """
         domain = inputs['domain']
-        if domain == "imo_proof":
-            return self._forward_imo_proof(inputs)
 
         output_format, extract_field = self.OUTPUT_FORMATS.get(domain, ('Respond in JSON format with the following schema:\n<json>\n{\n    "response": ...\n}\n</json>', "response"))
         # ``system_prompt_override``: when set (via recursive_scientist's
@@ -92,9 +70,6 @@ Task input:
         new_msg_history = []
         current_instruction = instruction
         prediction = "None"
-        extra_body = (
-            NEMOTRON_NO_THINKING_EXTRA_BODY if domain == "imo_grading" else None
-        )
         for attempt in range(self.MAX_PARSE_RETRIES):
             try:
                 new_msg_history = chat_with_agent(
@@ -104,7 +79,6 @@ Task input:
                     logging=self.log,
                     reasoning_effort=self.reasoning_effort,
                     budget_status_path=self.budget_status_path,
-                    extra_body=extra_body,
                 )
             except RuntimeError as e:
                 if "truncated response" not in str(e):
@@ -130,42 +104,6 @@ Task input:
                 f'{output_format}'
             )
 
-        return prediction, new_msg_history
-
-    def _forward_imo_proof(self, inputs):
-        problem_statement = inputs["problem"]
-        system_prompt = self.system_prompt_override or IMO_PROOF_DEFAULT_PROMPT
-        instruction = (
-            f"{system_prompt}\n\n"
-            f"Problem: {problem_statement}\n\n"
-            "Output your solution wrapped in <SOLUTION>...</SOLUTION> tags."
-        )
-
-        self.log(f"Input: {instruction!r}")
-        try:
-            response_text, new_msg_history, _ = get_response_from_llm(
-                msg=instruction,
-                model=self.model,
-                max_tokens=IMO_PROOF_MAX_TOKENS,
-                max_continuation_rounds=1,
-                reasoning_effort=self.reasoning_effort,
-                extra_body=NEMOTRON_NO_THINKING_EXTRA_BODY,
-            )
-        except RuntimeError as e:
-            if "truncated response" not in str(e):
-                raise
-            self.log(f"Truncated prover response treated as malformed output: {e}")
-            return "None", []
-
-        prediction = _solution_wrapped(response_text)
-        if new_msg_history:
-            new_msg_history[-1]["text"] = prediction
-        else:
-            new_msg_history = [
-                {"role": "user", "text": instruction},
-                {"role": "assistant", "text": prediction},
-            ]
-        self.log(f"Output: {prediction!r}")
         return prediction, new_msg_history
 
 

@@ -13,9 +13,10 @@ from datetime import datetime
 import pandas as pd
 from types import ModuleType
 
-from utils.domain_utils import HUMAN_PREFERENCE_DOMAINS
+from utils.domain_utils import HUMAN_PREFERENCE_AND_GRADING_DOMAINS, HUMAN_PREFERENCE_DOMAINS
 
 REVIEW_DATASET_DOMAINS = HUMAN_PREFERENCE_DOMAINS
+HARNESS_DATASET_DOMAINS = {*HUMAN_PREFERENCE_AND_GRADING_DOMAINS, "imo_proof"}
 
 
 def get_dataset(domain, subset=""):
@@ -74,7 +75,7 @@ def load_task_agent(agent_path: str):
     """
     agent_path can be:
       - a python file path: ./task_agent.py or /abs/path/task_agent.py
-      - a module path: proofgrader.task_agent or my_pkg.my_agent
+      - a module path: my_pkg.my_agent
     Returns: TaskAgent class
     """
     # Case 1: looks like a file path or exists on disk
@@ -106,7 +107,6 @@ def harness(
     num_workers=5,
     resume_from=None,
     subset="",
-    proofs_dname=None,
     reasoning_effort=None,
     budget_status_path=None,
     system_prompt_override=None,
@@ -147,12 +147,7 @@ def harness(
         completed_ids = set()
 
     # Get dataset
-    if proofs_dname:
-        dataset = pd.read_csv(os.path.join(proofs_dname, "predictions.csv"), dtype=str)
-        dataset["Response"] = dataset["prediction"].copy()
-        dataset.drop(columns=["prediction"], inplace=True)
-    else:
-        dataset = get_dataset(domain=domain, subset=subset)
+    dataset = get_dataset(domain=domain, subset=subset)
     if num_samples > 0:
         dataset = dataset[:num_samples]
 
@@ -236,7 +231,6 @@ if __name__ == "__main__":
             "genesis_go2hop",
             "imo_grading",
             "imo_proof",
-            "imo_proof_grading",  # To grade generated proofs with an agent
         ],
         required=True,
         help="Domain to evaluate",
@@ -262,9 +256,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--subset", type=str, default="", help="Subset of the dataset to evaluate"
     )
-    parser.add_argument(
-        "--proofs_dname", type=str, default="", help="Path to the directory containing proofs to grade (for imo_proof_grading)"
-    )
     parser.add_argument("--model", type=str, required=True, help="Model to use")
     parser.add_argument(
         "--reasoning_effort",
@@ -288,17 +279,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     domain = args.domain
-   # Make proofs_dname required for imo_proof_grading
-    if domain == "imo_proof_grading" and not args.proofs_dname:
-        parser.error("--proofs_dname is required when domain is 'imo_proof_grading'")
 
     # Human preferences domains
-    if domain in {
-        *HUMAN_PREFERENCE_DOMAINS,
-        "imo_grading",
-        "imo_proof",
-        "imo_proof_grading",
-    }:
+    if domain in HARNESS_DATASET_DOMAINS:
         output_folder = harness(
             model=args.model,
             agent_path=args.agent_path,
@@ -310,7 +293,6 @@ if __name__ == "__main__":
             num_workers=args.num_workers,
             resume_from=args.resume_from,
             subset=args.subset,
-            proofs_dname=args.proofs_dname,
             reasoning_effort=args.reasoning_effort,
             budget_status_path=args.budget_status_path,
             system_prompt_override=args.system_prompt_override,
