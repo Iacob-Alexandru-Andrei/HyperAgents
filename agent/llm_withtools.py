@@ -150,6 +150,29 @@ def _resolve_compaction_config(catalog, model, max_output_tokens=None):
     return enabled, soft_cap, summary_max_tok
 
 
+def _load_local_model_catalog():
+    try:
+        with open(os.path.join("lineage", "model_catalog.json")) as fp:
+            payload = json.load(fp)
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, list) else None
+
+
+def _runtime_max_output_tokens(catalog, model):
+    override = os.environ.get("HYPERAGENTS_RUNTIME_MAX_OUTPUT_TOKENS")
+    if override:
+        return int(override)
+    for entry in catalog or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("model") == model or entry.get("id") == model:
+            cap = entry.get("max_output_tokens")
+            if cap is not None:
+                return int(cap)
+    return _DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS
+
+
 def _is_tool_result_message(message):
     """Last-msg-is-tool-result probe: starts with `<json>` and contains `tool_output`."""
     if not isinstance(message, dict):
@@ -416,6 +439,9 @@ def chat_with_agent(
     new_msg_history = msg_history
 
     try:
+        if catalog is None:
+            catalog = _load_local_model_catalog()
+        runtime_max_output_tokens = _runtime_max_output_tokens(catalog, model)
         # Load all tools
         all_tools = load_tools(
             logging=logging,
@@ -457,7 +483,7 @@ def chat_with_agent(
             reasoning_effort=reasoning_effort,
             logging=logging,
             budget_status_path=budget_status_path,
-            max_output_tokens=_DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS,
+            max_output_tokens=runtime_max_output_tokens,
         )
         compacted_last_round = new_msg_history is not prev_history_obj
         logging(f"Input: {repr(input_msg)}")
@@ -466,7 +492,7 @@ def chat_with_agent(
             model=model,
             msg_history=new_msg_history,
             reasoning_effort=reasoning_effort,
-            max_tokens=_DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS,
+            max_tokens=runtime_max_output_tokens,
             max_continuation_rounds=_DEFAULT_MAX_CONTINUATION_ROUNDS,
             extra_body=extra_body,
         )
@@ -554,7 +580,7 @@ def chat_with_agent(
                 reasoning_effort=reasoning_effort,
                 logging=logging,
                 budget_status_path=budget_status_path,
-                max_output_tokens=_DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS,
+                max_output_tokens=runtime_max_output_tokens,
             )
             compacted_last_round = new_msg_history is not prev_history_obj
             logging(f"Input: {repr(input_msg)}")
@@ -563,7 +589,7 @@ def chat_with_agent(
                 model=model,
                 msg_history=new_msg_history,
                 reasoning_effort=reasoning_effort,
-                max_tokens=_DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS,
+                max_tokens=runtime_max_output_tokens,
                 max_continuation_rounds=_DEFAULT_MAX_CONTINUATION_ROUNDS,
                 extra_body=extra_body,
             )
