@@ -49,6 +49,13 @@ def _container_budget_status_path(budget_status_path):
     )
 
 
+def _container_labels(run_id, kind):
+    return {
+        "recursive-scientist.run_id": str(run_id),
+        "recursive-scientist.container_kind": kind,
+    }
+
+
 def _rewrite_model_for_proxy(model, cost_proxy_base_url):
     """Rewrite a model string's ``@<url>`` suffix to point at the cost proxy.
 
@@ -462,6 +469,7 @@ def run_generation_step(
         cost_proxy_network=cost_proxy_network,
         cost_proxy_upstream_hostnames=cost_proxy_upstream_hostnames,
         budget_status_path=budget_status_path,
+        container_labels=_container_labels(run_id, "generation"),
     )
     container.start()
     container_output_folder = "/tmp/"

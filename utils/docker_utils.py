@@ -145,6 +145,7 @@ def build_container(
     cost_proxy_network=None,
     cost_proxy_upstream_hostnames=None,
     budget_status_path=None,
+    container_labels=None,
 ):
     """
     Build the Docker image with proxy and host networking, then run it interactively.
@@ -298,6 +299,12 @@ def build_container(
             host_dir, container_dir = budget_status_volume
             volumes[host_dir] = {"bind": container_dir, "mode": "ro"}
 
+        labels = {"recursive-scientist.managed": "true"}
+        if container_labels:
+            labels.update(
+                {str(key): str(value) for key, value in container_labels.items()}
+            )
+
         run_kwargs = {
             "image": image_name,
             "name": container_name,
@@ -308,6 +315,8 @@ def build_container(
             "volumes": volumes,
             "environment": _container_runtime_environment(),
             "command": "tail -f /dev/null",
+            "auto_remove": True,
+            "labels": labels,
         }
 
         # When the cost proxy is enabled, switch off host networking and
@@ -339,6 +348,9 @@ def build_container(
                     host_dir, container_dir = budget_status_volume
                     volume_mounts.append(f"{host_dir}:{container_dir}:ro")
                 cmd = ["podman", "run", "-d", "-it"]
+                cmd.append("--rm")
+                for key, value in labels.items():
+                    cmd += ["--label", f"{key}={value}"]
                 if "network" in run_kwargs:
                     cmd += ["--network", str(run_kwargs["network"])]
                 else:
@@ -725,6 +737,8 @@ def cleanup_container(container, verbose=True):
     try:
         safe_log(f"Removing container {container.name}...", verbose=verbose)
         container.remove(force=True)
+    except docker.errors.NotFound:
+        safe_log(f"Container {container.name} already removed.", verbose=verbose)
     except Exception as e:
         safe_log(
             f"Error while removing container {container.name}: {e}",
