@@ -739,12 +739,29 @@ def cleanup_container(container, verbose=True):
         container.remove(force=True)
     except docker.errors.NotFound:
         safe_log(f"Container {container.name} already removed.", verbose=verbose)
+    except docker.errors.APIError as e:
+        if _removal_already_in_progress(e):
+            safe_log(
+                f"Container {container.name} is already being removed.",
+                verbose=verbose,
+            )
+            return
+        safe_log(
+            f"Error while removing container {container.name}: {e}",
+            level=logging.ERROR,
+            verbose=verbose,
+        )
     except Exception as e:
         safe_log(
             f"Error while removing container {container.name}: {e}",
             level=logging.ERROR,
             verbose=verbose,
         )
+
+
+def _removal_already_in_progress(error):
+    message = str(error).lower()
+    return "removal of container" in message and "already in progress" in message
 
 
 # Cost-enforcing egress proxy network helpers.
