@@ -1,5 +1,4 @@
 import json
-import math
 import os
 import re
 
@@ -21,11 +20,6 @@ _COMPRESSION_RATIO_FLOOR = 2.0
 _DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS = int(
     os.environ.get("HYPERAGENTS_RUNTIME_MAX_OUTPUT_TOKENS", "32768")
 )
-_DEFAULT_TOTAL_OUTPUT_TOKENS = int(
-    os.environ.get("HYPERAGENTS_LLM_TOTAL_OUTPUT_TOKENS", "32768")
-)
-
-
 _COMPACTION_SUMMARY_PROMPT = (
     "You are compressing your own reasoning history to free up context.\n"
     "Below are the turns of a meta-agent (your prior self) working on a "
@@ -174,14 +168,11 @@ def _runtime_max_output_tokens(catalog, model):
     return _DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS
 
 
-def _runtime_max_continuation_rounds(runtime_max_output_tokens):
+def _runtime_max_continuation_rounds():
     override = os.environ.get("HYPERAGENTS_LLM_MAX_CONTINUATION_ROUNDS")
     if override:
         return int(override)
-    return max(
-        1,
-        math.ceil(_DEFAULT_TOTAL_OUTPUT_TOKENS / max(1, runtime_max_output_tokens)) - 1,
-    )
+    return 0
 
 
 def _is_tool_result_message(message):
@@ -453,9 +444,7 @@ def chat_with_agent(
         if catalog is None:
             catalog = _load_local_model_catalog()
         runtime_max_output_tokens = _runtime_max_output_tokens(catalog, model)
-        runtime_max_continuation_rounds = _runtime_max_continuation_rounds(
-            runtime_max_output_tokens
-        )
+        runtime_max_continuation_rounds = _runtime_max_continuation_rounds()
         # Load all tools
         all_tools = load_tools(
             logging=logging,

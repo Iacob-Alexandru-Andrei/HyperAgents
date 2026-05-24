@@ -96,7 +96,7 @@ def get_response_from_llm(
     model: str,
     temperature: float = 0.0,
     max_tokens: int = MAX_TOKENS,
-    max_continuation_rounds: int = 1,
+    max_continuation_rounds: int = 0,
     msg_history=None,
     reasoning_effort: str | None = None,
     extra_body: dict | None = None,
@@ -164,15 +164,9 @@ def get_response_from_llm(
         reasoning = msg_obj.get('reasoning_content')
         if isinstance(reasoning, str) and reasoning.strip():
             response_text = reasoning
-    # F2d: continuation pass on output-cap truncation. When the model
-    # returns finish_reason=length we lost the tail of the response.
-    # Re-issue with the partial response stitched in plus a "continue"
-    # instruction; concatenate and check finish_reason again. Bounded
-    # at max_continuation_rounds=1 by default so a pathological loop
-    # can't run away; one continuation handles the common case
-    # (output slightly over the cap) without spending unbounded compute
-    # on a runaway generation. The meta-agent can override the bound
-    # per-call when it expects long structured output.
+    # F2d: continuation pass on output-cap truncation. Continuations are
+    # explicit opt-in via ``max_continuation_rounds``; the default is zero
+    # so a model catalog output ceiling never turns into extra calls.
     continuation_rounds = 0
     while (
         choice.get('finish_reason') == 'length'
