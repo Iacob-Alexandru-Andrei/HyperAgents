@@ -433,6 +433,8 @@ def chat_with_agent(
     current_gen=None,
     max_format_retries=1,  # F2d: cap formatting-retry passes per response
     extra_body=None,
+    max_output_tokens=None,
+    allow_truncated_response=False,
 ):
     get_response_fn = get_response_from_llm
     # Construct message
@@ -443,7 +445,11 @@ def chat_with_agent(
     try:
         if catalog is None:
             catalog = _load_local_model_catalog()
-        runtime_max_output_tokens = _runtime_max_output_tokens(catalog, model)
+        runtime_max_output_tokens = (
+            int(max_output_tokens)
+            if max_output_tokens is not None
+            else _runtime_max_output_tokens(catalog, model)
+        )
         runtime_max_continuation_rounds = _runtime_max_continuation_rounds()
         # Load all tools
         all_tools = load_tools(
@@ -498,6 +504,7 @@ def chat_with_agent(
             max_tokens=runtime_max_output_tokens,
             max_continuation_rounds=runtime_max_continuation_rounds,
             extra_body=extra_body,
+            allow_truncated_response=allow_truncated_response,
         )
         logging(f"Output: {repr(response)}")
         # logging(f"Info: {repr(info)}")
@@ -595,6 +602,7 @@ def chat_with_agent(
                 max_tokens=runtime_max_output_tokens,
                 max_continuation_rounds=runtime_max_continuation_rounds,
                 extra_body=extra_body,
+                allow_truncated_response=allow_truncated_response,
             )
             logging(f"Output: {repr(response)}")
             # logging(f"Info: {repr(info)}")

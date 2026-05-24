@@ -17,7 +17,9 @@ class TaskAgent(AgentSystem):
         self.budget_status_path = budget_status_path
         self.system_prompt_override = system_prompt_override
 
-    MAX_PARSE_RETRIES = 1
+    MAX_PARSE_RETRIES = 0
+    RAW_OUTPUT_FALLBACK_DOMAINS = {"paper_writer_review", "imo_proof"}
+    DOMAIN_OUTPUT_TOKEN_CAPS = {"imo_proof": 4096}
 
     def forward(self, inputs):
         """
@@ -62,15 +64,12 @@ Task input:
 
 {output_format}"""
 
-        # Bounded retry on parse failure: up to MAX_PARSE_RETRIES calls total;
-        # each retry sends a corrective re-prompt that restates the required
-        # format. History accumulates across attempts so the model sees its own
-        # bad output. On exhaustion, fall through to the sentinel ``"None"``
-        # that downstream eval code already handles.
+        raw_output_fallback = domain in self.RAW_OUTPUT_FALLBACK_DOMAINS
+        max_output_tokens = self.DOMAIN_OUTPUT_TOKEN_CAPS.get(domain)
         new_msg_history = []
         current_instruction = instruction
         prediction = "None"
-        for attempt in range(self.MAX_PARSE_RETRIES):
+        for attempt in range(self.MAX_PARSE_RETRIES + 1):
             try:
                 new_msg_history = chat_with_agent(
                     current_instruction,
@@ -79,6 +78,8 @@ Task input:
                     logging=self.log,
                     reasoning_effort=self.reasoning_effort,
                     budget_status_path=self.budget_status_path,
+                    max_output_tokens=max_output_tokens,
+                    allow_truncated_response=raw_output_fallback,
                 )
             except RuntimeError as e:
                 if "truncated response" not in str(e):
@@ -97,6 +98,10 @@ Task input:
                     if isinstance(obj, dict) and extract_field in obj:
                         prediction = obj[extract_field]
                         return prediction, new_msg_history
+            if raw_output_fallback and attempt == self.MAX_PARSE_RETRIES:
+                raw_text = new_msg_history[-1].get("text") if new_msg_history else None
+                if isinstance(raw_text, str) and raw_text.strip():
+                    return raw_text, new_msg_history
             current_instruction = (
                 'Your previous reply did not contain a parseable JSON object '
                 f'with the required field "{extract_field}". '

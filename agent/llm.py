@@ -100,6 +100,7 @@ def get_response_from_llm(
     msg_history=None,
     reasoning_effort: str | None = None,
     extra_body: dict | None = None,
+    allow_truncated_response: bool = False,
 ) -> Tuple[str, list, dict]:
     if msg_history is None:
         msg_history = []
@@ -199,6 +200,13 @@ def get_response_from_llm(
         # prefix, so naive concatenation is correct in the common case.
         response_text = (response_text or "") + chunk
     if choice.get('finish_reason') == 'length':
+        if allow_truncated_response:
+            new_msg_history.append({"role": "assistant", "content": response_text})
+            new_msg_history = [
+                {**msg, "text": msg.pop("content")} if "content" in msg else msg
+                for msg in new_msg_history
+            ]
+            return response_text, new_msg_history, {"finish_reason": "length"}
         raise RuntimeError(
             f"truncated response from {litellm_model}: finish_reason=length "
             f"after {continuation_rounds} continuation rounds "
