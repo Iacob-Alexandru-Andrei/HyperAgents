@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 
@@ -20,8 +21,8 @@ _COMPRESSION_RATIO_FLOOR = 2.0
 _DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS = int(
     os.environ.get("HYPERAGENTS_RUNTIME_MAX_OUTPUT_TOKENS", "32768")
 )
-_DEFAULT_MAX_CONTINUATION_ROUNDS = int(
-    os.environ.get("HYPERAGENTS_LLM_MAX_CONTINUATION_ROUNDS", "3")
+_DEFAULT_TOTAL_OUTPUT_TOKENS = int(
+    os.environ.get("HYPERAGENTS_LLM_TOTAL_OUTPUT_TOKENS", "32768")
 )
 
 
@@ -171,6 +172,16 @@ def _runtime_max_output_tokens(catalog, model):
             if cap is not None:
                 return int(cap)
     return _DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS
+
+
+def _runtime_max_continuation_rounds(runtime_max_output_tokens):
+    override = os.environ.get("HYPERAGENTS_LLM_MAX_CONTINUATION_ROUNDS")
+    if override:
+        return int(override)
+    return max(
+        1,
+        math.ceil(_DEFAULT_TOTAL_OUTPUT_TOKENS / max(1, runtime_max_output_tokens)) - 1,
+    )
 
 
 def _is_tool_result_message(message):
@@ -442,6 +453,9 @@ def chat_with_agent(
         if catalog is None:
             catalog = _load_local_model_catalog()
         runtime_max_output_tokens = _runtime_max_output_tokens(catalog, model)
+        runtime_max_continuation_rounds = _runtime_max_continuation_rounds(
+            runtime_max_output_tokens
+        )
         # Load all tools
         all_tools = load_tools(
             logging=logging,
@@ -493,7 +507,7 @@ def chat_with_agent(
             msg_history=new_msg_history,
             reasoning_effort=reasoning_effort,
             max_tokens=runtime_max_output_tokens,
-            max_continuation_rounds=_DEFAULT_MAX_CONTINUATION_ROUNDS,
+            max_continuation_rounds=runtime_max_continuation_rounds,
             extra_body=extra_body,
         )
         logging(f"Output: {repr(response)}")
@@ -590,7 +604,7 @@ def chat_with_agent(
                 msg_history=new_msg_history,
                 reasoning_effort=reasoning_effort,
                 max_tokens=runtime_max_output_tokens,
-                max_continuation_rounds=_DEFAULT_MAX_CONTINUATION_ROUNDS,
+                max_continuation_rounds=runtime_max_continuation_rounds,
                 extra_body=extra_body,
             )
             logging(f"Output: {repr(response)}")
