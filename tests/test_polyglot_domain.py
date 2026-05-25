@@ -55,6 +55,28 @@ def test_polyglot_task_list_prefers_staged_split_csv(tmp_path: Path):
     ) == ["python__staged"]
 
 
+def test_polyglot_task_list_fallback_uses_staged_root_subsets(tmp_path: Path):
+    import json
+
+    import generation_step
+
+    subset = tmp_path / "root" / "domains" / "polyglot" / "subsets" / "medium.json"
+    subset.parent.mkdir(parents=True)
+    subset.write_text(json.dumps(["python__from_root"]), encoding="utf-8")
+
+    assert generation_step._polyglot_task_list_for_eval(str(tmp_path / "root"), "val", "") == [
+        "python__from_root"
+    ]
+
+
+def test_polyglot_metadata_path_uses_staged_root(tmp_path: Path):
+    import generation_step
+
+    assert generation_step._polyglot_metadata_path(str(tmp_path / "root")) == str(
+        tmp_path / "root" / "domains" / "polyglot" / "polyglot_benchmark_metadata.json"
+    )
+
+
 def test_polyglot_worker_routes_to_host_harness(monkeypatch, tmp_path: Path):
     import generation_step
 

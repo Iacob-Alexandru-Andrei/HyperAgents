@@ -105,7 +105,12 @@ def _polyglot_task_list_for_eval(root_dir, split, eval_subset):
         with open(staged_csv, newline="", encoding="utf-8") as handle:
             return [row["instance_id"] for row in csv.DictReader(handle)]
     subset = _polyglot_subset_for_split(split, eval_subset)
-    return load_json_file(f"./domains/polyglot/subsets/{subset}.json")
+    subset_path = os.path.join(root_dir, "domains", "polyglot", "subsets", f"{subset}.json")
+    return load_json_file(subset_path)
+
+
+def _polyglot_metadata_path(root_dir):
+    return os.path.join(root_dir, "domains", "polyglot", "polyglot_benchmark_metadata.json")
 
 
 def run_harness_polyglot(
@@ -136,6 +141,7 @@ def run_harness_polyglot(
     )
 
     harness_polyglot(
+        dataset_path=_polyglot_metadata_path(root_dir),
         test_task_list=test_task_list,
         num_samples=num_samples,
         max_workers=max_workers,
