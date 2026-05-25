@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 import argparse
+import csv
 import json
 import logging
 import os
@@ -32,7 +33,6 @@ from utils.gl_utils import (
     get_score,
     run_commands_to_check_compilation,
     setup_initial_gen,
-    update_node_metadata,
     is_starting_node,
     process_meta_patch_files,
 )
@@ -87,57 +87,104 @@ def _upstream_hostname_from_model(model):
     return parsed.hostname or None
 
 
-def run_harness_polyglot(root_dir, output_dir, genid, *, model, skip_staged_eval=False, num_samples=-1):
+def _polyglot_subset_for_split(split, eval_subset):
+    if eval_subset in {"small", "medium"}:
+        return eval_subset
+    if eval_subset.endswith("_train"):
+        return "small"
+    if eval_subset.endswith(("_val", "_test")):
+        return "medium"
+    if split == "train":
+        return "small"
+    return "medium"
+
+
+def _polyglot_task_list_for_eval(root_dir, split, eval_subset):
+    staged_csv = os.path.join(root_dir, "domains", "polyglot", f"dataset_{split}.csv")
+    if os.path.exists(staged_csv):
+        with open(staged_csv, newline="", encoding="utf-8") as handle:
+            return [row["instance_id"] for row in csv.DictReader(handle)]
+    subset = _polyglot_subset_for_split(split, eval_subset)
+    subset_path = os.path.join(root_dir, "domains", "polyglot", "subsets", f"{subset}.json")
+    return load_json_file(subset_path)
+
+
+def _polyglot_metadata_path(root_dir):
+    return os.path.join(root_dir, "domains", "polyglot", "polyglot_benchmark_metadata.json")
+
+
+def run_harness_polyglot(
+    *,
+    root_dir,
+    output_dir,
+    genid,
+    model,
+    split="train",
+    eval_subset="",
+    skip_staged_eval=False,
+    num_samples=-1,
+    max_workers=10,
+):
     # NOTE: the harness for polyglot is different because each task instance needs a docker container
     from domains.polyglot.harness import harness as harness_polyglot
     from domains.polyglot.report import report as report_polyglot
 
-    eval_output_dir = os.path.join(output_dir, f"gen_{genid}", "polyglot_eval")
-    test_more_threshold = 0.4  # NOTE: same setting as that in DGM
+    eval_run_id = "polyglot_eval" if split == "train" else f"polyglot_eval_{split}"
+    eval_output_dir = os.path.join(output_dir, f"gen_{genid}", eval_run_id)
     model_name_or_path = "eval_run"
     patch_files = get_patch_files(output_dir, genid)
-    run_next_eval = True
+    test_task_list = _polyglot_task_list_for_eval(root_dir, split, eval_subset)
+    expected_num_tasks = (
+        min(num_samples, len(test_task_list))
+        if num_samples and num_samples > 0
+        else len(test_task_list)
+    )
 
-    # Small sample size evaluation for staged eval
-    if not skip_staged_eval:
-        test_task_list = load_json_file("./domains/polyglot/subsets/small.json")
-        dnames = harness_polyglot(
-            test_task_list=test_task_list,
-            num_samples=-1,
-            max_workers=10,
-            model_name_or_path=model_name_or_path,
-            model_patch_paths=patch_files,
-            num_evals=1,
-            num_evals_parallel=1,
-            pred_dname=eval_output_dir,
-            output_dir=eval_output_dir,
-            root_dir=root_dir,
-            model=model,
-        )
-        report_polyglot(output_dir=eval_output_dir, run_keyword=model_name_or_path, expected_num_tasks=len(test_task_list))
-        stagedeval_score = get_score("polyglot", output_dir, genid)
-        run_next_eval = stagedeval_score is not None and stagedeval_score >= test_more_threshold
+    harness_polyglot(
+        dataset_path=_polyglot_metadata_path(root_dir),
+        test_task_list=test_task_list,
+        num_samples=num_samples,
+        max_workers=max_workers,
+        model_name_or_path=model_name_or_path,
+        model_patch_paths=patch_files,
+        num_evals=1,
+        num_evals_parallel=1,
+        pred_dname=eval_output_dir,
+        output_dir=eval_output_dir,
+        root_dir=root_dir,
+        model=model,
+    )
+    report_polyglot(
+        output_dir=eval_output_dir,
+        run_keyword=model_name_or_path,
+        expected_num_tasks=expected_num_tasks,
+    )
 
-    # Check if additional evaluation should be run
-    if run_next_eval:
-        test_task_list_more = load_json_file("./domains/polyglot/subsets/medium.json")
-        dnames = harness_polyglot(
-            test_task_list=test_task_list + test_task_list_more,
-            num_samples=num_samples,
-            max_workers=10,
-            model_name_or_path=model_name_or_path,
-            model_patch_paths=patch_files,
-            num_evals=1,
-            num_evals_parallel=1,
-            pred_dname=eval_output_dir,
-            output_dir=eval_output_dir,
-            root_dir=root_dir,
-            model=model,
-        )
-        report_polyglot(output_dir=eval_output_dir, run_keyword=model_name_or_path, expected_num_tasks=len(test_task_list + test_task_list_more))
 
-    # Update metadata
-    update_node_metadata(output_dir, genid, {"run_full_eval": run_next_eval})
+def _eval_polyglot_produced_agent(
+    *,
+    root_dir,
+    output_dir,
+    genid,
+    model,
+    split,
+    eval_subset,
+    eval_samples,
+    eval_workers,
+    skip_staged_eval,
+):
+    run_harness_polyglot(
+        root_dir=root_dir,
+        output_dir=output_dir,
+        genid=genid,
+        model=model,
+        split=split,
+        eval_subset=eval_subset,
+        num_samples=eval_samples,
+        max_workers=eval_workers,
+        skip_staged_eval=skip_staged_eval,
+    )
+
 
 def eval_produced_agent(
     container,
@@ -585,6 +632,25 @@ def run_generation_step(
 
             def eval_agent_worker(domain, eval_subset, eval_n):
                 setup_logger(log_path)  # Re-setup logger because of threading
+                if domain == "polyglot":
+                    polyglot_splits = (
+                        get_domain_splits(domain, eval_test=eval_test)
+                        if splits is None
+                        else splits
+                    )
+                    for split in polyglot_splits:
+                        _eval_polyglot_produced_agent(
+                            root_dir=root_dir,
+                            output_dir=output_dir,
+                            genid=current_genid,
+                            model=_task_agent_models.get(domain, model),
+                            split=split,
+                            eval_subset=eval_subset,
+                            eval_samples=eval_n,
+                            eval_workers=eval_workers,
+                            skip_staged_eval=skip_staged_eval,
+                        )
+                    return
                 eval_produced_agent(
                     container,
                     container_output_folder,
