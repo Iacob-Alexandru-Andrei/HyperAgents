@@ -77,6 +77,22 @@ def test_polyglot_metadata_path_uses_staged_root(tmp_path: Path):
     )
 
 
+def test_polyglot_harness_materializes_benchmark_from_source(monkeypatch, tmp_path: Path):
+    from domains.polyglot.harness import _ensure_polyglot_benchmark
+
+    source = tmp_path / "source-benchmark"
+    source.mkdir()
+    (source / "sentinel.txt").write_text("benchmark source", encoding="utf-8")
+    root = tmp_path / "root"
+
+    monkeypatch.setenv("POLYGLOT_BENCHMARK_SOURCE", str(source))
+
+    target = _ensure_polyglot_benchmark(root)
+
+    assert target == root / "domains" / "polyglot" / "polyglot-benchmark"
+    assert (target / "sentinel.txt").read_text(encoding="utf-8") == "benchmark source"
+
+
 def test_polyglot_build_image_copies_repo_from_staged_root(tmp_path: Path):
     from domains.polyglot.docker_build import build_image
 

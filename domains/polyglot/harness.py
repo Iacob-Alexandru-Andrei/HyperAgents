@@ -2,6 +2,8 @@ import argparse
 import datetime
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 from enum import Enum
 import re
@@ -25,6 +27,56 @@ from domains.polyglot.utils import (
     safe_log,
     setup_logger,
 )
+
+POLYGLOT_BENCHMARK_URL = "https://github.com/Aider-AI/polyglot-benchmark.git"
+
+
+def _polyglot_dir(root_dir):
+    root = Path(root_dir) if root_dir is not None else Path(".")
+    return root / "domains" / "polyglot"
+
+
+def _benchmark_source_candidates(target):
+    env_source = os.getenv("POLYGLOT_BENCHMARK_SOURCE")
+    if env_source:
+        yield Path(env_source)
+    env_cache = os.getenv("POLYGLOT_BENCHMARK_CACHE")
+    if env_cache:
+        yield Path(env_cache)
+    cwd_source = Path("domains") / "polyglot" / "polyglot-benchmark"
+    if cwd_source.resolve() != target.resolve():
+        yield cwd_source
+
+
+def _link_or_copy_benchmark(source, target):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target.symlink_to(source.resolve(), target_is_directory=True)
+    except OSError:
+        shutil.copytree(source, target)
+
+
+def _ensure_polyglot_benchmark(root_dir):
+    target = _polyglot_dir(root_dir) / "polyglot-benchmark"
+    if target.exists():
+        return target
+
+    for candidate in _benchmark_source_candidates(target):
+        if candidate.exists():
+            _link_or_copy_benchmark(candidate, target)
+            return target
+
+    cache = Path(
+        os.getenv(
+            "POLYGLOT_BENCHMARK_CACHE",
+            Path(tempfile.gettempdir()) / "polyglot-benchmark",
+        )
+    )
+    if not cache.exists():
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "clone", POLYGLOT_BENCHMARK_URL, str(cache)], check=True)
+    _link_or_copy_benchmark(cache, target)
+    return target
 
 
 def get_eval_script(commands):
@@ -285,6 +337,7 @@ def harness(
         raise FileNotFoundError(f"Dataset file not found: {dataset_path}")
     with open(dataset_path) as f:
         dataset = json.load(f)
+    _ensure_polyglot_benchmark(root_dir)
     
     # Ensure that necessary directories exist
     if model_name_or_path is None:
