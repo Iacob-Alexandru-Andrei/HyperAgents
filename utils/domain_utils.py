@@ -39,7 +39,10 @@ def get_domain_splits(domain, eval_test=False):
         return ["train"]
     # Polyglot domain
     elif "polyglot" in domain:
-        return ["train"]
+        splits = ["train", "val"]
+        if eval_test:
+            splits.append("test")
+        return splits
 
 
 def can_domain_ensembled(domain):
@@ -117,7 +120,7 @@ def get_domain_stagedeval_frac(domain):
         return 3/6
     # Polyglot domain
     elif "polyglot" in domain:
-        return 10/60
+        return 10 / 50
 
 
 def has_domain_val_subset(domain):
@@ -132,4 +135,4 @@ def has_domain_val_subset(domain):
         return False
     # Polyglot domain
     elif "polyglot" in domain:
-        return False
+        return True
