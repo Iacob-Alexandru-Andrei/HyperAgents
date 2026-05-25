@@ -1,8 +1,11 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 import argparse
+import csv
 import json
+import logging
 import os
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -30,63 +33,158 @@ from utils.gl_utils import (
     get_score,
     run_commands_to_check_compilation,
     setup_initial_gen,
-    update_node_metadata,
     is_starting_node,
     process_meta_patch_files,
 )
 
+BUDGET_STATUS_CONTAINER_DIR = "/rqgm_budget"
 
-def run_harness_polyglot(root_dir, output_dir, genid, *, model, skip_staged_eval=False, num_samples=-1):
+
+def _container_budget_status_path(budget_status_path):
+    if not budget_status_path:
+        return None
+    return os.path.join(
+        BUDGET_STATUS_CONTAINER_DIR,
+        os.path.basename(budget_status_path),
+    )
+
+
+def _container_labels(run_id, kind):
+    return {
+        "recursive-scientist.run_id": str(run_id),
+        "recursive-scientist.container_kind": kind,
+    }
+
+
+def _rewrite_model_for_proxy(model, cost_proxy_base_url):
+    """Rewrite a model string's ``@<url>`` suffix to point at the cost proxy.
+
+    ``cost_proxy_base_url`` is the bridge-internal URL (e.g.
+    ``http://proxy:9100/v1``); model strings without an ``@<url>`` suffix pass
+    through unchanged.
+    """
+    if not cost_proxy_base_url or not model or "@" not in model:
+        return model
+    head, sep, _suffix = model.partition("@")
+    if not sep:
+        return model
+    return f"{head}@{cost_proxy_base_url}"
+
+
+def _upstream_hostname_from_model(model):
+    """Extract the upstream hostname (e.g. ``inference-api.nvidia.com``) from
+    a model string with an ``@<base_url>`` suffix. Returns ``None`` when the
+    model has no suffix or the suffix is unparseable.
+    """
+    if not model or "@" not in model:
+        return None
+    _head, _sep, suffix = model.partition("@")
+    if not suffix:
+        return None
+    from urllib.parse import urlparse
+
+    parsed = urlparse(suffix)
+    return parsed.hostname or None
+
+
+def _polyglot_subset_for_split(split, eval_subset):
+    if eval_subset in {"small", "medium"}:
+        return eval_subset
+    if eval_subset.endswith("_train"):
+        return "small"
+    if eval_subset.endswith(("_val", "_test")):
+        return "medium"
+    if split == "train":
+        return "small"
+    return "medium"
+
+
+def _polyglot_task_list_for_eval(root_dir, split, eval_subset):
+    staged_csv = os.path.join(root_dir, "domains", "polyglot", f"dataset_{split}.csv")
+    if os.path.exists(staged_csv):
+        with open(staged_csv, newline="", encoding="utf-8") as handle:
+            return [row["instance_id"] for row in csv.DictReader(handle)]
+    subset = _polyglot_subset_for_split(split, eval_subset)
+    subset_path = os.path.join(root_dir, "domains", "polyglot", "subsets", f"{subset}.json")
+    return load_json_file(subset_path)
+
+
+def _polyglot_metadata_path(root_dir):
+    return os.path.join(root_dir, "domains", "polyglot", "polyglot_benchmark_metadata.json")
+
+
+def run_harness_polyglot(
+    *,
+    root_dir,
+    output_dir,
+    genid,
+    model,
+    split="train",
+    eval_subset="",
+    skip_staged_eval=False,
+    num_samples=-1,
+    max_workers=10,
+):
     # NOTE: the harness for polyglot is different because each task instance needs a docker container
     from domains.polyglot.harness import harness as harness_polyglot
     from domains.polyglot.report import report as report_polyglot
 
-    eval_output_dir = os.path.join(output_dir, f"gen_{genid}", "polyglot_eval")
-    test_more_threshold = 0.4  # NOTE: same setting as that in DGM
+    eval_run_id = "polyglot_eval" if split == "train" else f"polyglot_eval_{split}"
+    eval_output_dir = os.path.join(output_dir, f"gen_{genid}", eval_run_id)
     model_name_or_path = "eval_run"
     patch_files = get_patch_files(output_dir, genid)
-    run_next_eval = True
+    test_task_list = _polyglot_task_list_for_eval(root_dir, split, eval_subset)
+    expected_num_tasks = (
+        min(num_samples, len(test_task_list))
+        if num_samples and num_samples > 0
+        else len(test_task_list)
+    )
 
-    # Small sample size evaluation for staged eval
-    if not skip_staged_eval:
-        test_task_list = load_json_file("./domains/polyglot/subsets/small.json")
-        dnames = harness_polyglot(
-            test_task_list=test_task_list,
-            num_samples=-1,
-            max_workers=10,
-            model_name_or_path=model_name_or_path,
-            model_patch_paths=patch_files,
-            num_evals=1,
-            num_evals_parallel=1,
-            pred_dname=eval_output_dir,
-            output_dir=eval_output_dir,
-            root_dir=root_dir,
-            model=model,
-        )
-        report_polyglot(output_dir=eval_output_dir, run_keyword=model_name_or_path, expected_num_tasks=len(test_task_list))
-        stagedeval_score = get_score("polyglot", output_dir, genid)
-        run_next_eval = stagedeval_score is not None and stagedeval_score >= test_more_threshold
+    harness_polyglot(
+        dataset_path=_polyglot_metadata_path(root_dir),
+        test_task_list=test_task_list,
+        num_samples=num_samples,
+        max_workers=max_workers,
+        model_name_or_path=model_name_or_path,
+        model_patch_paths=patch_files,
+        num_evals=1,
+        num_evals_parallel=1,
+        pred_dname=eval_output_dir,
+        output_dir=eval_output_dir,
+        root_dir=root_dir,
+        model=model,
+    )
+    report_polyglot(
+        output_dir=eval_output_dir,
+        run_keyword=model_name_or_path,
+        expected_num_tasks=expected_num_tasks,
+    )
 
-    # Check if additional evaluation should be run
-    if run_next_eval:
-        test_task_list_more = load_json_file("./domains/polyglot/subsets/medium.json")
-        dnames = harness_polyglot(
-            test_task_list=test_task_list + test_task_list_more,
-            num_samples=num_samples,
-            max_workers=10,
-            model_name_or_path=model_name_or_path,
-            model_patch_paths=patch_files,
-            num_evals=1,
-            num_evals_parallel=1,
-            pred_dname=eval_output_dir,
-            output_dir=eval_output_dir,
-            root_dir=root_dir,
-            model=model,
-        )
-        report_polyglot(output_dir=eval_output_dir, run_keyword=model_name_or_path, expected_num_tasks=len(test_task_list + test_task_list_more))
 
-    # Update metadata
-    update_node_metadata(output_dir, genid, {"run_full_eval": run_next_eval})
+def _eval_polyglot_produced_agent(
+    *,
+    root_dir,
+    output_dir,
+    genid,
+    model,
+    split,
+    eval_subset,
+    eval_samples,
+    eval_workers,
+    skip_staged_eval,
+):
+    run_harness_polyglot(
+        root_dir=root_dir,
+        output_dir=output_dir,
+        genid=genid,
+        model=model,
+        split=split,
+        eval_subset=eval_subset,
+        num_samples=eval_samples,
+        max_workers=eval_workers,
+        skip_staged_eval=skip_staged_eval,
+    )
+
 
 def eval_produced_agent(
     container,
@@ -98,9 +196,17 @@ def eval_produced_agent(
     eval_workers=10,
     eval_subset="_filtered_100_train",
     eval_test=False,
+    reasoning_effort=None,
+    splits=None,
+    budget_status_path=None,
+    system_prompt_override=None,
 ):
-    # Evaluate the produced agent
-    splits = get_domain_splits(domain, eval_test=eval_test)
+    # When ``splits`` is supplied (a non-None list[str]), iterate over exactly
+    # those splits; otherwise fall back to ``get_domain_splits``. The explicit
+    # parameter lets concurrent callers with different splits avoid racing on
+    # the process-global lookup.
+    if splits is None:
+        splits = get_domain_splits(domain, eval_test=eval_test)
     for split in splits:  # pyright: ignore
         safe_log(f"Evaluating the produced agent on {domain} {eval_samples} {split}...")
         eval_run_id = f"{domain}_eval" if split == "train" else f"{domain}_eval_{split}"
@@ -128,6 +234,12 @@ def eval_produced_agent(
             "--model",
             model,
         ]
+        if reasoning_effort:
+            command += ["--reasoning_effort", reasoning_effort]
+        if budget_status_path:
+            command += ["--budget_status_path", budget_status_path]
+        if system_prompt_override:
+            command += ["--system_prompt_override", system_prompt_override]
         exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
         log_container_output(exec_result)
         command = [
@@ -178,6 +290,25 @@ def copy_prev_eval_to_container(
     copy_to_container(
         container, source_path=prev_eval_path, dest_path=container_prev_eval_path
     )
+
+    # When the run dir uses the v2 layout (gens/, pending/ subdirs), also
+    # copy the ancestor gens from the sibling `gens/` so the meta-agent
+    # sees every ancestor's predictions / chat history / metadata under
+    # the same eval_path tree. In v1 there is no gens/ subdir; the walk
+    # above already covered everything.
+    gens_root = os.path.join(os.path.dirname(prev_eval_path), "gens")
+    if prev_eval_path.endswith("/pending") and os.path.isdir(gens_root):
+        for entry in os.listdir(gens_root):
+            if not entry.startswith("gen_"):
+                continue
+            src = os.path.join(gens_root, entry)
+            if not os.path.isdir(src):
+                continue
+            copy_to_container(
+                container,
+                source_path=src,
+                dest_path=os.path.join(container_prev_eval_path, entry),
+            )
 
     lineage_gen_dirs = _lineage_gen_dirs(prev_eval_path, parent_genid)
     non_lineage_prune_cmds = _non_lineage_prune_cmds(
@@ -253,8 +384,12 @@ def _non_lineage_prune_cmds(prev_eval_path, container_prev_eval_path, lineage_ge
 
 
 def _read_parent_genid(output_dir, genid):
-    metadata_file = os.path.join(output_dir, f"gen_{genid}", "metadata.json")
-    if not os.path.exists(metadata_file):
+    candidates = [
+        os.path.join(output_dir, f"gen_{genid}", "metadata.json"),
+        os.path.join(os.path.dirname(output_dir), "gens", f"gen_{genid}", "metadata.json"),
+    ]
+    metadata_file = next((p for p in candidates if os.path.exists(p)), None)
+    if metadata_file is None:
         return None
     with open(metadata_file, "r") as f:
         metadata = json.load(f)
@@ -284,8 +419,73 @@ def run_generation_step(
     skip_staged_eval=False,
     iterations_left=0,
     *,
-    model,
+    model=None,
+    meta_agent_model=None,
+    task_agent_models=None,
+    reasoning_effort=None,
+    meta_agent_reasoning_effort=None,
+    task_agent_reasoning_efforts=None,
+    task_agent_prompts=None,
+    splits=None,
+    cost_proxy_enabled=None,
+    cost_proxy_network=None,
+    cost_proxy_base_url=None,
+    budget_status_path=None,
+    produce_patch=True,
 ):
+    """``produce_patch=True`` is the generator pass (train): it writes
+    ``model_patch.diff`` (the meta-agent's code-only edit).
+    ``produce_patch=False`` is a measurement pass (val/test/cross-eval):
+    it applies the gen's full patch chain, runs eval, but does NOT
+    touch ``model_patch.diff``."""
+    # Per-role model routing: ``model`` is the uniform fallback (required by
+    # the polyglot harness path). ``meta_agent_model`` overrides the meta-agent
+    # invocation only; ``task_agent_models`` is a per-domain map for task-agent
+    # eval calls. Either path falls back to ``model`` when its specific entry
+    # is missing. ``reasoning_effort`` mirrors this shape: a uniform value
+    # applies to all calls; ``meta_agent_reasoning_effort`` and
+    # ``task_agent_reasoning_efforts`` override per call site. ``None`` means
+    # "do not pass the parameter through".
+    if model is None and meta_agent_model is None and not task_agent_models:
+        raise TypeError(
+            "run_generation_step requires `model=`, `meta_agent_model=`, or `task_agent_models=`"
+        )
+    meta_agent_model = meta_agent_model if meta_agent_model is not None else model
+    _task_agent_models = dict(task_agent_models or {})
+    meta_agent_reasoning_effort = (
+        meta_agent_reasoning_effort
+        if meta_agent_reasoning_effort is not None
+        else reasoning_effort
+    )
+    _task_agent_reasoning_efforts = dict(task_agent_reasoning_efforts or {})
+    _task_agent_prompts = dict(task_agent_prompts or {})
+    # When the cost proxy is enabled, rewrite every ``--model`` arg's
+    # ``@<url>`` suffix to point at the bridge-internal proxy URL. The catalog
+    # is rewritten separately by ``rewrite_catalog_for_proxy``; the CLI
+    # ``--model`` args are an independent channel and must be rewritten here so
+    # the container can resolve the proxy hostname over the internal bridge.
+    cost_proxy_upstream_hostnames = ()
+    if cost_proxy_enabled and cost_proxy_base_url:
+        # Collect upstream hostnames BEFORE rewriting so the lockdown can
+        # also map them to the bridge gateway as a fail-fast safety net.
+        upstream_hostnames = set()
+        for source in (
+            (model,) if model is not None else (),
+            (meta_agent_model,) if meta_agent_model is not None else (),
+            tuple(_task_agent_models.values()),
+        ):
+            for m in source:
+                hostname = _upstream_hostname_from_model(m)
+                if hostname:
+                    upstream_hostnames.add(hostname)
+        cost_proxy_upstream_hostnames = tuple(sorted(upstream_hostnames))
+        if model is not None:
+            model = _rewrite_model_for_proxy(model, cost_proxy_base_url)
+        meta_agent_model = _rewrite_model_for_proxy(meta_agent_model, cost_proxy_base_url)
+        _task_agent_models = {
+            d: _rewrite_model_for_proxy(m, cost_proxy_base_url)
+            for d, m in _task_agent_models.items()
+        }
     # Setup local output folder
     prev_gen_dir = os.path.join(output_dir, f"gen_{parent_genid}")
     gen_output_dir = os.path.join(output_dir, f"gen_{current_genid}")
@@ -312,33 +512,64 @@ def run_generation_step(
         image_name,
         container_name,
         domains=domains,
+        cost_proxy_enabled=cost_proxy_enabled,
+        cost_proxy_network=cost_proxy_network,
+        cost_proxy_upstream_hostnames=cost_proxy_upstream_hostnames,
+        budget_status_path=budget_status_path,
+        container_labels=_container_labels(run_id, "generation"),
     )
     container.start()
     container_output_folder = "/tmp/"
+    container_budget_status_path = _container_budget_status_path(budget_status_path)
 
     try:
         # Apply meta patches (only for starting node, because subsequent generations will inherit the patches from the parent)
         if is_starting_node(current_genid):
             meta_patch_files = meta_patch_files or []
             commit_hash = apply_diffs_container(container, meta_patch_files)
-            metadata["prev_patch_files"] += meta_patch_files
+            if produce_patch:
+                metadata["prev_patch_files"] += meta_patch_files
 
         # Apply all lineage diffs
         patch_files = get_patch_files(output_dir, parent_genid) if parent_patch_files is None else parent_patch_files
-        metadata["prev_patch_files"] += patch_files
+        # Measurement passes (``produce_patch=False``) apply patches to set up
+        # the workspace but must NOT mutate ``prev_patch_files`` -- the train
+        # pass already recorded the canonical chain. For producer (train)
+        # passes, ``parent_patch_files`` already contains the gen's own patch
+        # path (passed as ``prev + curr``); apply the full chain to set up the
+        # workspace but exclude self from ``prev_patch_files`` (self belongs in
+        # ``curr``). Without this dedupe, ``prev + curr = [parent, self, self]``
+        # and the second ``patch -p1`` of self fails with "file already exists".
+        self_patch_path = os.path.normpath(
+            os.path.join(gen_output_dir, "agent_output", "model_patch.diff")
+        )
+        if produce_patch:
+            parent_chain_only = [
+                p for p in patch_files if os.path.normpath(p) != self_patch_path
+            ]
+            metadata["prev_patch_files"] += parent_chain_only
         commit_hash = apply_diffs_container(container, patch_files)
 
+        local_agentoutput_folder = os.path.join(gen_output_dir, "agent_output/")
+        container_agentoutput_folder = os.path.join(
+            container_output_folder, "agent_output"
+        )
+        os.makedirs(local_agentoutput_folder, exist_ok=True)
+        container.exec_run(
+            ["mkdir", "-p", container_agentoutput_folder], workdir="/"
+        )
+
         if run_meta_agent:
-            # Copy previous generations to container
             container_prev_eval_path = copy_prev_eval_to_container(
-                container, output_dir, container_output_folder, current_genid=current_genid, parent_genid=parent_genid,
+                container,
+                output_dir,
+                container_output_folder,
+                current_genid=current_genid,
+                parent_genid=parent_genid,
             )
 
             # Run meta agent
             safe_log("Running meta agent...")
-            container_agentoutput_folder = os.path.join(
-                container_output_folder, "agent_output"
-            )
             container_chat_history_file = os.path.join(
                 container_agentoutput_folder, "meta_agent_chat_history.md"
             )
@@ -362,15 +593,22 @@ def run_generation_step(
                 "--iterations_left",
                 str(max(0, iterations_left)),
                 "--model",
-                model,
+                meta_agent_model,
             ]
+            if meta_agent_reasoning_effort:
+                command += ["--reasoning_effort", meta_agent_reasoning_effort]
+            if container_budget_status_path:
+                command += ["--budget_status_path", container_budget_status_path]
 
             exec_result = container.exec_run(cmd=command, workdir=f"/{REPO_NAME}")
             log_container_output(exec_result)
             metadata["parent_agent_success"] = exec_result.exit_code == 0
+            # Persist the meta-agent exit code so the host can distinguish a
+            # wall-clock kill (the in-container ``timeout 21600`` wrapper exits
+            # 124) from a clean-exit ``parent_agent_success=False``.
+            metadata["meta_agent_exit_code"] = int(exec_result.exit_code or 0)
 
             # Copy container outputs to local
-            local_agentoutput_folder = os.path.join(gen_output_dir, "agent_output/")
             copy_from_container(
                 container,
                 source_path=container_agentoutput_folder,
@@ -394,6 +632,25 @@ def run_generation_step(
 
             def eval_agent_worker(domain, eval_subset, eval_n):
                 setup_logger(log_path)  # Re-setup logger because of threading
+                if domain == "polyglot":
+                    polyglot_splits = (
+                        get_domain_splits(domain, eval_test=eval_test)
+                        if splits is None
+                        else splits
+                    )
+                    for split in polyglot_splits:
+                        _eval_polyglot_produced_agent(
+                            root_dir=root_dir,
+                            output_dir=output_dir,
+                            genid=current_genid,
+                            model=_task_agent_models.get(domain, model),
+                            split=split,
+                            eval_subset=eval_subset,
+                            eval_samples=eval_n,
+                            eval_workers=eval_workers,
+                            skip_staged_eval=skip_staged_eval,
+                        )
+                    return
                 eval_produced_agent(
                     container,
                     container_output_folder,
@@ -403,7 +660,13 @@ def run_generation_step(
                     eval_workers=eval_workers,
                     eval_subset=eval_subset,
                     eval_test=eval_test,
-                    model=model,
+                    model=_task_agent_models.get(domain, model),
+                    reasoning_effort=_task_agent_reasoning_efforts.get(
+                        domain, reasoning_effort
+                    ),
+                    splits=splits,
+                    budget_status_path=container_budget_status_path,
+                    system_prompt_override=_task_agent_prompts.get(domain),
                 )
 
             # Small sample size evaluation for staged eval
@@ -455,6 +718,14 @@ def run_generation_step(
                         raise
                 metadata["run_full_eval"] = True
 
+            if produce_patch:
+                final_patch = os.path.join(local_agentoutput_folder, "model_patch.diff")
+                if (
+                    file_exist_and_not_empty(final_patch)
+                    and final_patch not in metadata["curr_patch_files"]
+                ):
+                    metadata["curr_patch_files"].append(final_patch)
+
     except Exception as e:
         safe_log(f"Error in generate: {e}")
         metadata["run_eval"] = False
@@ -482,8 +753,13 @@ def run_generation_step(
             ]
         )
         metadata["valid_parent"] = metadata["run_eval"] and (eval_successful or meta_patch_files is not None)
-        with open(os.path.join(gen_output_dir, "metadata.json"), "w") as f:
-            json.dump(metadata, f, indent=4)
+        # Measurement passes must not overwrite the gen's canonical
+        # metadata.json -- the train pass already wrote it with the
+        # authoritative ``prev_patch_files`` / ``curr_patch_files`` chain, and
+        # the measurement pass's local ``metadata`` dict would clobber it.
+        if produce_patch:
+            with open(os.path.join(gen_output_dir, "metadata.json"), "w") as f:
+                json.dump(metadata, f, indent=4)
 
     return metadata
 
@@ -513,7 +789,15 @@ if __name__ == "__main__":
         help="One or more domains to evaluate (must be from the allowed list)",
     )
     parser.add_argument("--model", type=str, required=True, help="Model to use")
+    parser.add_argument(
+        "--reasoning_effort",
+        type=str,
+        default=None,
+        choices=["low", "medium", "high"],
+        help="OpenAI-style reasoning_effort applied to meta + task agent calls",
+    )
     parser.add_argument("--iterations_left", type=int, default=0)
+    parser.add_argument("--budget_status_path", type=str, default=None)
     parser.add_argument(
         "--eval_samples",
         type=int,
@@ -603,6 +887,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("--skip_meta_agent", default=False, action="store_true")
     parser.add_argument("--skip_eval_after_meta_agent", default=False, action="store_true")
+    parser.add_argument(
+        "--splits",
+        type=str,
+        nargs="+",
+        default=None,
+        choices=["train", "val", "test"],
+        help="Explicit splits to evaluate (overrides get_domain_splits)",
+    )
     args = parser.parse_args()
 
     # Post-parse validation
@@ -650,6 +942,7 @@ if __name__ == "__main__":
         docker.from_env(),
         domains=args.domains,
         model=args.model,
+        reasoning_effort=args.reasoning_effort,
         run_id=run_id,
         iterations_left=args.iterations_left,
         output_dir=args.output_dir,
@@ -666,4 +959,6 @@ if __name__ == "__main__":
         run_eval_after_meta_agent=not args.skip_eval_after_meta_agent,
         eval_test=args.eval_test,
         skip_staged_eval=args.skip_staged_eval,
+        splits=args.splits,
+        budget_status_path=args.budget_status_path,
     )

@@ -54,7 +54,16 @@ def run_eval(
     container_name = f"{REPO_NAME}-{domain}-eval-container-{run_id}"
     client = docker.from_env()
     container = build_container(
-        client, root_dir, image_name, container_name, domains=[domain],
+        client,
+        root_dir,
+        image_name,
+        container_name,
+        domains=[domain],
+        container_labels={
+            "recursive-scientist.run_id": str(run_id),
+            "recursive-scientist.container_kind": "domain-eval",
+            "recursive-scientist.domain": str(domain),
+        },
     )
 
     container.start()

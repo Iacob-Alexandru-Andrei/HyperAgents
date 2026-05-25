@@ -1,5 +1,4 @@
 import os
-import shutil
 import sys
 
 # Add the project root to Python path
@@ -66,7 +65,6 @@ def report(
             print(e)
 
     # Accuracy by label
-    label_accuracies = df.groupby(ground_truth_key)["match"].mean()
     label_counts = df[ground_truth_key].value_counts()
 
     print("\nAccuracy by label:")
@@ -126,10 +124,10 @@ def report(
         },
         "random_guess_accuracy": random_guess_accuracy,
         "question_ids_failed": [
-            row[question_id_col] for _, row in df[df["match"] == False].iterrows()
+            row[question_id_col] for _, row in df[~df["match"]].iterrows()
         ],
         "question_ids_passed": [
-            row[question_id_col] for _, row in df[df["match"] == True].iterrows()
+            row[question_id_col] for _, row in df[df["match"]].iterrows()
         ],
     }
 
@@ -139,26 +137,6 @@ def report(
         json.dump(report, f, indent=4)
 
     return report, report_path
-
-def report_imo_proof(dname, model):
-    # Grade the generated proofs
-    from domains.harness import harness
-    output_folder = harness(
-        model=model,
-        domain="imo_proof_grading",
-        agent_path="proofgrader.task_agent",
-        proofs_dname=dname,
-        output_dir=dname,
-        run_id="gradings",
-    )
-    # Get report of grading
-    from domains.imo.proof_eval import report_proof_grading
-    report_proof_grading(dname=output_folder)
-    # Move report to one dir above
-    src = os.path.join(output_folder, "report.json")
-    dst = os.path.join(os.path.dirname(output_folder), "report.json")
-    shutil.move(src, dst)
-
 
 if __name__ == "__main__":
     # Parse command-line arguments
@@ -171,6 +149,7 @@ if __name__ == "__main__":
             "search_arena",
             "paper_review",
             "paper_writer_review",
+            "code_review",
             "balrog_babyai",
             "balrog_babaisai",
             "balrog_minihack",
@@ -179,12 +158,10 @@ if __name__ == "__main__":
             "genesis_go2walkback",
             "genesis_go2hop",
             "imo_grading",
-            "imo_proof",
         ],
         required=True,
         help="Domain to evaluate",
     )
-    # parser.add_argument("--proofgrader_repo", default="./proofgrader_repo", help="Path to repository containing the proof grader that we want to use for imo_proof domain")
     parser.add_argument("--model", type=str, default=None, help="Model to use when the report runs an agent")
     args = parser.parse_args()
 
@@ -193,11 +170,6 @@ if __name__ == "__main__":
     # Human preferences domains
     if domain in REPORT_DATASET_DOMAINS:
         report(dname=args.dname, domain=args.domain)
-
-    elif domain == "imo_proof":
-        if args.model is None:
-            parser.error("--model is required when --domain=imo_proof")
-        report_imo_proof(dname=args.dname, model=args.model)
 
     # Balrog game domains
     elif "balrog" in domain:
