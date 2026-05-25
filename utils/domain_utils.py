@@ -1,4 +1,9 @@
-HUMAN_PREFERENCE_DOMAINS = {"search_arena", "paper_review", "paper_writer_review"}
+HUMAN_PREFERENCE_DOMAINS = {
+    "search_arena",
+    "paper_review",
+    "paper_writer_review",
+    "code_review",
+}
 HUMAN_PREFERENCE_AND_GRADING_DOMAINS = {*HUMAN_PREFERENCE_DOMAINS, "imo_grading"}
 EVALUATOR_DEPENDENT_PRODUCER_DOMAINS = {"paper_writer_review", "imo_proof"}
 ACCURACY_REPORT_DOMAINS = {*HUMAN_PREFERENCE_AND_GRADING_DOMAINS, "imo_proof"}

@@ -65,7 +65,6 @@ def report(
             print(e)
 
     # Accuracy by label
-    label_accuracies = df.groupby(ground_truth_key)["match"].mean()
     label_counts = df[ground_truth_key].value_counts()
 
     print("\nAccuracy by label:")
@@ -125,10 +124,10 @@ def report(
         },
         "random_guess_accuracy": random_guess_accuracy,
         "question_ids_failed": [
-            row[question_id_col] for _, row in df[df["match"] == False].iterrows()
+            row[question_id_col] for _, row in df[~df["match"]].iterrows()
         ],
         "question_ids_passed": [
-            row[question_id_col] for _, row in df[df["match"] == True].iterrows()
+            row[question_id_col] for _, row in df[df["match"]].iterrows()
         ],
     }
 
@@ -150,6 +149,7 @@ if __name__ == "__main__":
             "search_arena",
             "paper_review",
             "paper_writer_review",
+            "code_review",
             "balrog_babyai",
             "balrog_babaisai",
             "balrog_minihack",

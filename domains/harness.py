@@ -11,7 +11,6 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import pandas as pd
-from types import ModuleType
 
 from utils.domain_utils import HUMAN_PREFERENCE_AND_GRADING_DOMAINS, HUMAN_PREFERENCE_DOMAINS
 
@@ -222,6 +221,7 @@ if __name__ == "__main__":
             "search_arena",
             "paper_review",
             "paper_writer_review",
+            "code_review",
             "balrog_babyai",
             "balrog_babaisai",
             "balrog_minihack",

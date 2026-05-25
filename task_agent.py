@@ -144,4 +144,15 @@ TaskAgent.OUTPUT_FORMATS = {
         'For "Grade", use only "incorrect", "partial", "almost", or "correct".',
         "Grade",
     ),
+    "code_review": (
+        'You are reviewing a code patch for general code quality, maintainability, '
+        'simplicity, and review readiness. Decide whether the patch should pass review '
+        'as-is or fail review.\n\n'
+        'Respond with one JSON block:\n'
+        '{\n'
+        '  "Verdict": "pass" | "fail"\n'
+        '}\n'
+        'For "Verdict", use only "pass" or "fail".',
+        "Verdict",
+    ),
 }
