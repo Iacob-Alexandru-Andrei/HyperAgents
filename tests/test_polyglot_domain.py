@@ -93,6 +93,60 @@ def test_polyglot_harness_materializes_benchmark_from_source(monkeypatch, tmp_pa
     assert (target / "sentinel.txt").read_text(encoding="utf-8") == "benchmark source"
 
 
+def test_polyglot_harness_retargets_local_commits(monkeypatch, tmp_path: Path):
+    from domains.polyglot import prepare_polyglot_dataset
+    from domains.polyglot.harness import _retarget_dataset_to_local_commits
+
+    monkeypatch.setattr(
+        prepare_polyglot_dataset,
+        "register_git",
+        lambda _path: {"python__one": ("local-base", "local-test")},
+    )
+
+    rows = _retarget_dataset_to_local_commits(
+        [
+            {
+                "instance_id": "python__one",
+                "repo": "/old/root/polyglot-benchmark/python/exercises/practice/one",
+                "base_commit": "stale-base",
+                "test_commit": "stale-test",
+            }
+        ],
+        tmp_path / "polyglot-benchmark",
+    )
+
+    assert rows[0]["repo"] == (
+        "domains/polyglot/polyglot-benchmark/python/exercises/practice/one"
+    )
+    assert rows[0]["base_commit"] == "local-base"
+    assert rows[0]["test_commit"] == "local-test"
+
+
+def test_polyglot_harness_prefers_core_requirements(tmp_path: Path):
+    from domains.polyglot.harness import _agent_requirements_path
+
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "requirements.txt").write_text("full\n", encoding="utf-8")
+    (root / "requirements-core.txt").write_text("core\n", encoding="utf-8")
+
+    assert _agent_requirements_path(root) == root / "requirements-core.txt"
+
+
+def test_polyglot_harness_aliases_nvidia_key_for_inference_api(monkeypatch):
+    from domains.polyglot.harness import _agent_env_vars
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("NVIDIA_API_KEY", "sk-nvidia")
+
+    env_vars = _agent_env_vars(
+        "openai/nvidia/nvidia/nemotron-3-super-v3@https://inference-api.nvidia.com/v1"
+    )
+
+    assert env_vars["OPENAI_API_KEY"] == "sk-nvidia"
+    assert env_vars["NVIDIA_API_KEY"] == "sk-nvidia"
+
+
 def test_polyglot_build_image_copies_repo_from_staged_root(tmp_path: Path):
     from domains.polyglot.docker_build import build_image
 
