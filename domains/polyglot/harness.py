@@ -2,6 +2,8 @@ import argparse
 import datetime
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 from enum import Enum
 import re
@@ -25,6 +27,106 @@ from domains.polyglot.utils import (
     safe_log,
     setup_logger,
 )
+
+POLYGLOT_BENCHMARK_URL = "https://github.com/Aider-AI/polyglot-benchmark.git"
+POLYGLOT_REPO_PREFIX = Path("domains") / "polyglot" / "polyglot-benchmark"
+
+
+def _polyglot_dir(root_dir):
+    root = Path(root_dir) if root_dir is not None else Path(".")
+    return root / "domains" / "polyglot"
+
+
+def _benchmark_source_candidates(target):
+    env_source = os.getenv("POLYGLOT_BENCHMARK_SOURCE")
+    if env_source:
+        yield Path(env_source)
+    env_cache = os.getenv("POLYGLOT_BENCHMARK_CACHE")
+    if env_cache:
+        yield Path(env_cache)
+    cwd_source = Path("domains") / "polyglot" / "polyglot-benchmark"
+    if cwd_source.resolve() != target.resolve():
+        yield cwd_source
+
+
+def _link_or_copy_benchmark(source, target):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target.symlink_to(source.resolve(), target_is_directory=True)
+    except OSError:
+        shutil.copytree(source, target)
+
+
+def _ensure_polyglot_benchmark(root_dir):
+    target = _polyglot_dir(root_dir) / "polyglot-benchmark"
+    if target.exists():
+        return target
+
+    for candidate in _benchmark_source_candidates(target):
+        if candidate.exists():
+            _link_or_copy_benchmark(candidate, target)
+            return target
+
+    cache = Path(
+        os.getenv(
+            "POLYGLOT_BENCHMARK_CACHE",
+            Path(tempfile.gettempdir()) / "polyglot-benchmark",
+        )
+    )
+    if not cache.exists():
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "clone", POLYGLOT_BENCHMARK_URL, str(cache)], check=True)
+    _link_or_copy_benchmark(cache, target)
+    return target
+
+
+def _polyglot_relative_repo(repo):
+    parts = Path(repo).parts
+    if "polyglot-benchmark" not in parts:
+        return repo
+    start = parts.index("polyglot-benchmark") + 1
+    return str(POLYGLOT_REPO_PREFIX.joinpath(*parts[start:]))
+
+
+def _retarget_dataset_to_local_commits(dataset, benchmark_path):
+    from domains.polyglot.prepare_polyglot_dataset import register_git
+
+    commits = register_git(benchmark_path)
+    retargeted = []
+    for entry in dataset:
+        instance_id = entry["instance_id"]
+        if instance_id not in commits:
+            raise KeyError(f"Missing Polyglot commit metadata for {instance_id}")
+        base_commit, test_commit = commits[instance_id]
+        updated = dict(entry)
+        updated["repo"] = _polyglot_relative_repo(entry["repo"])
+        updated["base_commit"] = base_commit
+        updated["test_commit"] = test_commit
+        retargeted.append(updated)
+    return retargeted
+
+
+def _agent_requirements_path(root_dir):
+    root = Path(root_dir) if root_dir is not None else Path(".")
+    core_requirements = root / "requirements-core.txt"
+    if core_requirements.is_file():
+        return core_requirements
+    return root / "requirements.txt"
+
+
+def _agent_env_vars(model):
+    nvidia_api_key = os.getenv("NVIDIA_API_KEY")
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    if "inference-api.nvidia.com" in str(model) and nvidia_api_key:
+        openai_api_key = nvidia_api_key
+    elif not openai_api_key:
+        openai_api_key = nvidia_api_key
+    return {
+        "ANTHROPIC_API_KEY": os.getenv('ANTHROPIC_API_KEY'),
+        "OPENAI_API_KEY": openai_api_key,
+        "NVIDIA_API_KEY": nvidia_api_key,
+        "METAGEN_ACCESS_TOKEN": os.getenv('METAGEN_ACCESS_TOKEN'),
+    }
 
 
 def get_eval_script(commands):
@@ -62,14 +164,22 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths, root_
         container_name = test_spec.get_instance_container_name(run_id)
         remove_existing_container(client, container_name)
         # Now create and start the container
-        container = build_container(test_spec, client, run_id, logger, nocache, force_rebuild=False)
+        container = build_container(
+            test_spec,
+            client,
+            run_id,
+            logger,
+            nocache,
+            force_rebuild=False,
+            repo_root=root_dir,
+        )
         container.start()
 
         # Copy the necessary files and requirements to the container
         root_dir = root_dir if root_dir is not None else "./"
         copy_to_container(container, os.path.join(root_dir, 'task_agent.py'), f'/{REPO_NAME}/task_agent.py')
         copy_to_container(container, os.path.join(root_dir, 'run_task_agent.py'), f'/{REPO_NAME}/run_task_agent.py')
-        copy_to_container(container, os.path.join(root_dir, 'requirements.txt'), f'/{REPO_NAME}/requirements.txt')
+        copy_to_container(container, _agent_requirements_path(root_dir), f'/{REPO_NAME}/requirements.txt')
         copy_to_container(container, os.path.join(root_dir, 'agent/'), f'/{REPO_NAME}/agent/')
         copy_to_container(container, os.path.join(root_dir, 'utils/'), f'/{REPO_NAME}/utils/')
         copy_to_container(container, os.path.join(root_dir, 'meta_agent.py'), f'/{REPO_NAME}/meta_agent.py')
@@ -101,11 +211,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths, root_
         log_container_output(exec_result)
 
         # Run the agent
-        env_vars = {
-            "ANTHROPIC_API_KEY": os.getenv('ANTHROPIC_API_KEY'),
-            "OPENAI_API_KEY": os.getenv('OPENAI_API_KEY'),
-            "METAGEN_ACCESS_TOKEN": os.getenv('METAGEN_ACCESS_TOKEN'),
-        }
+        env_vars = _agent_env_vars(model)
         safe_log("Running the agent")
         cmd = [
             "timeout", "600",  # 10 min timeout
@@ -277,6 +383,8 @@ def harness(
         raise FileNotFoundError(f"Dataset file not found: {dataset_path}")
     with open(dataset_path) as f:
         dataset = json.load(f)
+    benchmark_path = _ensure_polyglot_benchmark(root_dir)
+    dataset = _retarget_dataset_to_local_commits(dataset, benchmark_path)
     
     # Ensure that necessary directories exist
     if model_name_or_path is None:

@@ -10,6 +10,8 @@ import random
 import re
 import shutil
 import subprocess
+import tempfile
+import threading
 
 import numpy as np
 
@@ -183,13 +185,40 @@ def update_node_metadata(output_dir, genid, data_update):
     metadata_file = os.path.join(output_dir, f"{folder_prefix}_{genid}/metadata.json")
     if not os.path.exists(metadata_file):
         return
-    with open(metadata_file, "r") as f:
-        metadata = json.load(f)
-    # Update metadata
-    metadata.update(data_update)
-    # Save metadata
-    with open(metadata_file, "w") as f:
-        json.dump(metadata, f, indent=4)
+    metadata_dir = os.path.dirname(metadata_file)
+    lock_dir = os.path.join(output_dir, ".metadata_locks")
+    os.makedirs(lock_dir, exist_ok=True)
+    lock_file = os.path.join(lock_dir, f"{folder_prefix}_{genid}.lock")
+    with open(lock_file, "a") as lock_handle:
+        import fcntl
+
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            with open(metadata_file, "r") as f:
+                metadata = json.load(f)
+            # Update metadata
+            metadata.update(data_update)
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f".metadata.{os.getpid()}.{threading.get_ident()}.",
+                suffix=".tmp",
+                dir=metadata_dir,
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(metadata, f, indent=4)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_name, metadata_file)
+                dir_fd = os.open(metadata_dir, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            finally:
+                if os.path.exists(tmp_name):
+                    os.unlink(tmp_name)
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
 def get_node_metadata_key(output_dir, genid, key):
@@ -318,9 +347,9 @@ def setup_initial_gen(
         "baselines",
         "domains",
     }
+    # Keep ``Dockerfile`` and ``.dockerignore`` (not in this set) so
+    # ``docker_utils.build_image`` can find them inside the cloned workspace.
     excluded_files = {
-        "Dockerfile",
-        ".dockerignore",
         "setup_initial.sh",
         "LICENSE.md",
         "CODE_OF_CONDUCT.md",

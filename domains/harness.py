@@ -11,11 +11,11 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import pandas as pd
-from types import ModuleType
 
-from utils.domain_utils import HUMAN_PREFERENCE_DOMAINS
+from utils.domain_utils import HUMAN_PREFERENCE_AND_GRADING_DOMAINS, HUMAN_PREFERENCE_DOMAINS
 
 REVIEW_DATASET_DOMAINS = HUMAN_PREFERENCE_DOMAINS
+HARNESS_DATASET_DOMAINS = {*HUMAN_PREFERENCE_AND_GRADING_DOMAINS, "imo_proof"}
 
 
 def get_dataset(domain, subset=""):
@@ -26,10 +26,45 @@ def get_dataset(domain, subset=""):
         df = pd.read_csv(f"./domains/{domain}/dataset{subset}.csv", dtype=str)
     return df
 
-def run_agent(TaskAgent, model, row, evals_folder, format_input_dict, question_id_col):
+def run_agent(
+    TaskAgent,
+    model,
+    row,
+    evals_folder,
+    format_input_dict,
+    question_id_col,
+    reasoning_effort=None,
+    budget_status_path=None,
+    system_prompt_override=None,
+):
     question_id = row[question_id_col]
     chat_history_path = os.path.join(evals_folder, f"chat_history_{question_id}.md")
-    agent = TaskAgent(model=model, chat_history_file=chat_history_path)
+    # ``reasoning_effort`` and ``system_prompt_override`` are forwarded only when
+    # the TaskAgent constructor advertises them (the upstream upstream-base
+    # TaskAgent class does, but third-party patched versions in the meta-agent's
+    # diff stream may not). Each kwarg falls back independently to the previous
+    # constructor shape on TypeError so older diffed task_agent.py files keep
+    # working without the new optional arg.
+    agent_kwargs = {"model": model, "chat_history_file": chat_history_path}
+    try:
+        agent = TaskAgent(
+            **agent_kwargs,
+            reasoning_effort=reasoning_effort,
+            budget_status_path=budget_status_path,
+            system_prompt_override=system_prompt_override,
+        )
+    except TypeError:
+        try:
+            agent = TaskAgent(
+                **agent_kwargs,
+                reasoning_effort=reasoning_effort,
+                budget_status_path=budget_status_path,
+            )
+        except TypeError:
+            try:
+                agent = TaskAgent(**agent_kwargs, reasoning_effort=reasoning_effort)
+            except TypeError:
+                agent = TaskAgent(**agent_kwargs)
     inputs = format_input_dict(row)
     prediction, _ = agent.forward(inputs)
     return prediction
@@ -39,7 +74,7 @@ def load_task_agent(agent_path: str):
     """
     agent_path can be:
       - a python file path: ./task_agent.py or /abs/path/task_agent.py
-      - a module path: proofgrader.task_agent or my_pkg.my_agent
+      - a module path: my_pkg.my_agent
     Returns: TaskAgent class
     """
     # Case 1: looks like a file path or exists on disk
@@ -71,7 +106,9 @@ def harness(
     num_workers=5,
     resume_from=None,
     subset="",
-    proofs_dname=None,
+    reasoning_effort=None,
+    budget_status_path=None,
+    system_prompt_override=None,
 ):
     # Dynamically import functions based on the domain
     utils_prefix = domain.split("_", 1)[1] + "_" if domain.startswith("imo_") else ""
@@ -109,12 +146,7 @@ def harness(
         completed_ids = set()
 
     # Get dataset
-    if proofs_dname:
-        dataset = pd.read_csv(os.path.join(proofs_dname, "predictions.csv"), dtype=str)
-        dataset["Response"] = dataset["prediction"].copy()
-        dataset.drop(columns=["prediction"], inplace=True)
-    else:
-        dataset = get_dataset(domain=domain, subset=subset)
+    dataset = get_dataset(domain=domain, subset=subset)
     if num_samples > 0:
         dataset = dataset[:num_samples]
 
@@ -140,8 +172,15 @@ def harness(
                     i,
                     executor.submit(
                         run_agent,
-                        TaskAgent, model, row, evals_folder,
-                        format_input_dict, question_id_col,
+                        TaskAgent,
+                        model,
+                        row,
+                        evals_folder,
+                        format_input_dict,
+                        question_id_col,
+                        reasoning_effort,
+                        budget_status_path,
+                        system_prompt_override,
                     ),
                 )
             )
@@ -182,6 +221,7 @@ if __name__ == "__main__":
             "search_arena",
             "paper_review",
             "paper_writer_review",
+            "code_review",
             "balrog_babyai",
             "balrog_babaisai",
             "balrog_minihack",
@@ -191,7 +231,6 @@ if __name__ == "__main__":
             "genesis_go2hop",
             "imo_grading",
             "imo_proof",
-            "imo_proof_grading",  # To grade generated proofs with an agent
         ],
         required=True,
         help="Domain to evaluate",
@@ -217,24 +256,32 @@ if __name__ == "__main__":
     parser.add_argument(
         "--subset", type=str, default="", help="Subset of the dataset to evaluate"
     )
-    parser.add_argument(
-        "--proofs_dname", type=str, default="", help="Path to the directory containing proofs to grade (for imo_proof_grading)"
-    )
     parser.add_argument("--model", type=str, required=True, help="Model to use")
+    parser.add_argument(
+        "--reasoning_effort",
+        type=str,
+        default=None,
+        choices=["low", "medium", "high"],
+        help="OpenAI-style reasoning_effort forwarded into the TaskAgent",
+    )
+    parser.add_argument(
+        "--budget_status_path",
+        type=str,
+        default=None,
+        help="Path to the live budget status markdown injected into every chat turn",
+    )
+    parser.add_argument(
+        "--system_prompt_override",
+        type=str,
+        default=None,
+        help="Optional named-baseline system prompt (replaces 'You are an agent.')",
+    )
     args = parser.parse_args()
 
     domain = args.domain
-   # Make proofs_dname required for imo_proof_grading
-    if domain == "imo_proof_grading" and not args.proofs_dname:
-        parser.error("--proofs_dname is required when domain is 'imo_proof_grading'")
 
     # Human preferences domains
-    if domain in {
-        *HUMAN_PREFERENCE_DOMAINS,
-        "imo_grading",
-        "imo_proof",
-        "imo_proof_grading",
-    }:
+    if domain in HARNESS_DATASET_DOMAINS:
         output_folder = harness(
             model=args.model,
             agent_path=args.agent_path,
@@ -246,7 +293,9 @@ if __name__ == "__main__":
             num_workers=args.num_workers,
             resume_from=args.resume_from,
             subset=args.subset,
-            proofs_dname=args.proofs_dname,
+            reasoning_effort=args.reasoning_effort,
+            budget_status_path=args.budget_status_path,
+            system_prompt_override=args.system_prompt_override,
         )
 
     # Balrog game domains

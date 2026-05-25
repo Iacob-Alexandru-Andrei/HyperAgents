@@ -44,12 +44,27 @@ def main():
     parser.add_argument(
         "--outdir", required=False, default="./outputs/", help="Output directory"
     )
+    parser.add_argument(
+        "--reasoning_effort",
+        type=str,
+        default=None,
+        choices=["low", "medium", "high"],
+        help="OpenAI-style reasoning_effort applied to every meta-agent LLM call",
+    )
+    parser.add_argument(
+        "--budget_status_path",
+        type=str,
+        default=None,
+        help="Path to the live budget status markdown injected into every chat turn",
+    )
     args = parser.parse_args()
 
     # Run meta agent
     meta_agent = MetaAgent(
         model=args.model,
         chat_history_file=args.chat_history_file,
+        reasoning_effort=args.reasoning_effort,
+        budget_status_path=args.budget_status_path,
     )
     meta_agent.forward(
         repo_path=args.repo_path,

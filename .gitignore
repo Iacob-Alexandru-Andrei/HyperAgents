@@ -21,6 +21,7 @@ coverage.xml
 
 # Logs / env
 *.log
+domains/polyglot/logs/
 .env
 .env.*
 
