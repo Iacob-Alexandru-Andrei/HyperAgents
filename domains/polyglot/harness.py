@@ -62,7 +62,15 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths, root_
         container_name = test_spec.get_instance_container_name(run_id)
         remove_existing_container(client, container_name)
         # Now create and start the container
-        container = build_container(test_spec, client, run_id, logger, nocache, force_rebuild=False)
+        container = build_container(
+            test_spec,
+            client,
+            run_id,
+            logger,
+            nocache,
+            force_rebuild=False,
+            repo_root=root_dir,
+        )
         container.start()
 
         # Copy the necessary files and requirements to the container

@@ -79,6 +79,7 @@ def build_image(
         client: docker.DockerClient,
         build_dir: Path,
         repo: str = None,
+        repo_root: str | Path | None = None,
         nocache: bool = False,
     ):
     """
@@ -106,7 +107,7 @@ def build_image(
     try:
         # Copy a local folder to build_dir so Docker can see it
         if repo:
-            local_folder = Path(repo)  # your source folder
+            local_folder = Path(repo_root, repo) if repo_root is not None else Path(repo)
             if local_folder.is_dir():
                 target_folder = build_dir / repo
                 shutil.copytree(local_folder, target_folder, dirs_exist_ok=True)
@@ -426,6 +427,7 @@ def build_instance_image(
         client: docker.DockerClient,
         logger: logging.Logger|None,
         nocache: bool,
+        repo_root: str | Path | None = None,
     ):
     """
     Builds the instance image for the given test spec if it does not already exist.
@@ -487,7 +489,8 @@ def build_instance_image(
             client=client,
             build_dir=build_dir,
             nocache=nocache,
-            repo=test_spec.repo
+            repo=test_spec.repo,
+            repo_root=repo_root,
         )
     else:
         logger.info(f"Image {image_name} already exists, skipping build.")
@@ -502,7 +505,8 @@ def build_container(
         run_id: str,
         logger: logging.Logger,
         nocache: bool,
-        force_rebuild: bool = False
+        force_rebuild: bool = False,
+        repo_root: str | Path | None = None,
     ):
     """
     Builds the instance image for the given test spec and creates a container from the image.
@@ -518,7 +522,7 @@ def build_container(
     # Build corresponding instance image
     if force_rebuild:
         remove_image(client, test_spec.instance_image_key, "quiet")
-    build_instance_image(test_spec, client, logger, nocache)
+    build_instance_image(test_spec, client, logger, nocache, repo_root=repo_root)
 
     container = None
     try:

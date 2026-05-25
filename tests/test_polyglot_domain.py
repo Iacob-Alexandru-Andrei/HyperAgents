@@ -77,6 +77,38 @@ def test_polyglot_metadata_path_uses_staged_root(tmp_path: Path):
     )
 
 
+def test_polyglot_build_image_copies_repo_from_staged_root(tmp_path: Path):
+    from domains.polyglot.docker_build import build_image
+
+    staged_repo = tmp_path / "root" / "domains" / "polyglot"
+    staged_repo.mkdir(parents=True)
+    (staged_repo / "sentinel.txt").write_text("from staged root", encoding="utf-8")
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+
+    class FakeAPI:
+        def build(self, **_kwargs):
+            yield {"stream": "done"}
+
+    class FakeClient:
+        api = FakeAPI()
+
+    build_image(
+        image_name="fake-polyglot",
+        setup_scripts={},
+        dockerfile="FROM scratch\n",
+        platform="linux/amd64",
+        client=FakeClient(),
+        build_dir=build_dir,
+        repo="domains/polyglot",
+        repo_root=tmp_path / "root",
+    )
+
+    assert (build_dir / "domains" / "polyglot" / "sentinel.txt").read_text(
+        encoding="utf-8"
+    ) == "from staged root"
+
+
 def test_polyglot_worker_routes_to_host_harness(monkeypatch, tmp_path: Path):
     import generation_step
 
