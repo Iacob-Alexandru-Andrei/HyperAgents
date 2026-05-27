@@ -1,0 +1,94 @@
+{
+    "overall_accuracy": 0.8333333333333334,
+    "total_correct": 50,
+    "total": 60,
+    "accuracy_by_ground_truth": {
+        "accept": {
+            "precision": 0.7777777777777778,
+            "recall": 0.9333333333333333,
+            "correct": 28,
+            "total": 30
+        },
+        "reject": {
+            "precision": 0.9166666666666666,
+            "recall": 0.7333333333333333,
+            "correct": 22,
+            "total": 30
+        }
+    },
+    "label_distribution": {
+        "ground_truth": {
+            "accept": 0.5,
+            "reject": 0.5
+        },
+        "prediction": {
+            "accept": 0.6,
+            "reject": 0.4
+        }
+    },
+    "random_guess_accuracy": 0.5,
+    "question_ids_failed": [
+        "wF9Cz2PknU",
+        "6PcJEFKvBD",
+        "Woiqqi5bYV",
+        "i4ouG6Kc8M",
+        "w0b7fCX2nN",
+        "wxEASOHHdT",
+        "j1FLTvgyAh",
+        "zhxATDLAmJ",
+        "EmxpDiPgRu",
+        "xawA8X5dHq"
+    ],
+    "question_ids_passed": [
+        "GMwRl2e9Y1",
+        "ektPEcqGLb",
+        "f7VXdQTbyW",
+        "xojbzSYIVS",
+        "fMaEbeJGpp",
+        "x8jxf3byli",
+        "51cjeYcXjs",
+        "wWcNhS4g1U",
+        "xRi8sKo4XI",
+        "ydH8nU5csJ",
+        "OfjIlbelrT",
+        "xpmDc76RN2",
+        "CxXGvKRDnL",
+        "Pujt3ADZgI",
+        "LJNqVIKSCr",
+        "pqOjj90Vwp",
+        "GTUoTJXPBf",
+        "V1N6MmDY27",
+        "xAYOfMV264",
+        "Ma0993KZlq",
+        "gbJNFxcicC",
+        "CjwERcAU7w",
+        "fAAaT826Vv",
+        "q131tA7HCT",
+        "yEPNPbF8E7",
+        "wg1PCg3CUP",
+        "vngVydDWft",
+        "zl0HLZOJC9",
+        "zd5Knrtja4",
+        "WukSyFSzDt",
+        "RFJGFrMvYj",
+        "x5YEibapUM",
+        "ENlubvb262",
+        "74B6qX62vW",
+        "jkPDRHff3s",
+        "HC26cxtI96",
+        "OXIIFZqiiN",
+        "1NYhrZynvC",
+        "LxxIiInmuF",
+        "5XL8c0Vg9k",
+        "bxITGFPVWh",
+        "KgqucdSwIe",
+        "JDud6zbpFv",
+        "xRDYDI6Rc9",
+        "JOkgEY9os2",
+        "cfrDLD1wfO",
+        "QQBPWtvtcn",
+        "BACQLWQW8u",
+        "waIltEWDr8",
+        "yHVjncoGSp"
+    ]
+}

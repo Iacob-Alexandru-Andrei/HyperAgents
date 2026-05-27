@@ -1,0 +1,64 @@
+{
+    "overall_accuracy": 0.7666666666666667,
+    "total_correct": 23,
+    "total": 30,
+    "accuracy_by_ground_truth": {
+        "accept": {
+            "precision": 1.0,
+            "recall": 0.6,
+            "correct": 9,
+            "total": 15
+        },
+        "reject": {
+            "precision": 0.7,
+            "recall": 0.9333333333333333,
+            "correct": 14,
+            "total": 15
+        }
+    },
+    "label_distribution": {
+        "ground_truth": {
+            "reject": 0.5,
+            "accept": 0.5
+        },
+        "prediction": {
+            "reject": 0.6896551724137931,
+            "accept": 0.3103448275862069
+        }
+    },
+    "random_guess_accuracy": 0.5,
+    "question_ids_failed": [
+        "Pujt3ADZgI",
+        "Woiqqi5bYV",
+        "xojbzSYIVS",
+        "jkPDRHff3s",
+        "zhxATDLAmJ",
+        "bxITGFPVWh",
+        "QQBPWtvtcn"
+    ],
+    "question_ids_passed": [
+        "xawA8X5dHq",
+        "yEPNPbF8E7",
+        "yHVjncoGSp",
+        "RFJGFrMvYj",
+        "q131tA7HCT",
+        "w0b7fCX2nN",
+        "OXIIFZqiiN",
+        "GMwRl2e9Y1",
+        "pqOjj90Vwp",
+        "ydH8nU5csJ",
+        "ektPEcqGLb",
+        "WukSyFSzDt",
+        "x5YEibapUM",
+        "EmxpDiPgRu",
+        "i4ouG6Kc8M",
+        "OfjIlbelrT",
+        "wF9Cz2PknU",
+        "j1FLTvgyAh",
+        "fMaEbeJGpp",
+        "1NYhrZynvC",
+        "cfrDLD1wfO",
+        "V1N6MmDY27",
+        "LJNqVIKSCr"
+    ]
+}

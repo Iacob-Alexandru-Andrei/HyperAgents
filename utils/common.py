@@ -27,6 +27,31 @@ def extract_jsons(response):
             except json.JSONDecodeError:
                 continue  # Skip malformed JSON blocks
 
+    if not extracted_jsons:
+        decoder = json.JSONDecoder()
+        idx = 0
+        while idx < len(response):
+            start = response.find("{", idx)
+            if start == -1:
+                break
+            try:
+                extracted_json, end = decoder.raw_decode(response[start:])
+            except json.JSONDecodeError:
+                idx = start + 1
+                continue
+            if isinstance(extracted_json, dict):
+                extracted_jsons.append(extracted_json)
+            idx = start + end
+
+    if not extracted_jsons:
+        decision_match = re.search(
+            r'"Decision"\s*:\s*"?(Accept|Reject)"?',
+            response,
+            re.IGNORECASE,
+        )
+        if decision_match:
+            extracted_jsons.append({"Decision": decision_match.group(1).title()})
+
     return extracted_jsons if extracted_jsons else None
 
 def file_exist_and_not_empty(file_path):

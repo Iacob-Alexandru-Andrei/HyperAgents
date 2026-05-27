@@ -1,5 +1,7 @@
 import backoff
 import os
+import threading
+from datetime import datetime, timezone
 from typing import Tuple
 import requests
 import litellm
@@ -27,6 +29,54 @@ GEMINI_FLASH_MODEL = "gemini/gemini-2.5-flash"
 
 litellm.drop_params=True
 
+_TOKEN_LOG_CONTEXT = threading.local()
+_TOKEN_LOG_LOCK = threading.Lock()
+
+
+def set_token_log_context(path, question_id):
+    _TOKEN_LOG_CONTEXT.path = path
+    _TOKEN_LOG_CONTEXT.question_id = str(question_id)
+
+
+def clear_token_log_context():
+    _TOKEN_LOG_CONTEXT.path = None
+    _TOKEN_LOG_CONTEXT.question_id = None
+
+
+def _get_value(obj, key, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _write_token_usage(response, model):
+    path = getattr(_TOKEN_LOG_CONTEXT, "path", None) or os.environ.get(
+        "HYPERAGENTS_TOKEN_LOG"
+    )
+    if not path:
+        return
+
+    usage = _get_value(response, "usage", {}) or {}
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "question_id": getattr(_TOKEN_LOG_CONTEXT, "question_id", None),
+        "model": model,
+        "prompt_tokens": _get_value(usage, "prompt_tokens"),
+        "completion_tokens": _get_value(usage, "completion_tokens"),
+        "total_tokens": _get_value(usage, "total_tokens"),
+    }
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with _TOKEN_LOG_LOCK:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+
+
+def _split_model_api_base(model):
+    if "@" not in model:
+        return model, None
+    model_name, api_base = model.rsplit("@", 1)
+    return model_name, api_base
+
 @backoff.on_exception(
     backoff.expo,
     (requests.exceptions.RequestException, json.JSONDecodeError, KeyError),
@@ -51,30 +101,35 @@ def get_response_from_llm(
 
     new_msg_history = msg_history + [{"role": "user", "content": msg}]
 
+    litellm_model, api_base = _split_model_api_base(model)
+
     # Build kwargs - handle model-specific requirements
     completion_kwargs = {
-        "model": model,
+        "model": litellm_model,
         "messages": new_msg_history,
     }
+    if api_base:
+        completion_kwargs["api_base"] = api_base
 
     # GPT-5 and GPT-5-mini only support default temperature (1), skip it
     # GPT-5.2 supports temperature
-    if model in ["openai/gpt-5", "openai/gpt-5-mini"]:
+    if litellm_model in ["openai/gpt-5", "openai/gpt-5-mini"]:
         pass  # Don't set temperature
     else:
         completion_kwargs["temperature"] = temperature
 
     # GPT-5 models require max_completion_tokens instead of max_tokens
-    if "gpt-5" in model:
+    if "gpt-5" in litellm_model:
         completion_kwargs["max_completion_tokens"] = max_tokens
     else:
         # Claude Haiku has a 4096 token limit
-        if "claude-3-haiku" in model:
+        if "claude-3-haiku" in litellm_model:
             completion_kwargs["max_tokens"] = min(max_tokens, 4096)
         else:
             completion_kwargs["max_tokens"] = max_tokens
 
     response = litellm.completion(**completion_kwargs)
+    _write_token_usage(response, model)
     response_text = response['choices'][0]['message']['content']  # pyright: ignore
     new_msg_history.append({"role": "assistant", "content": response['choices'][0]['message']['content']})
 

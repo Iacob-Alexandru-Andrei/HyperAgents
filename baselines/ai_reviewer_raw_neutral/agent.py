@@ -1,0 +1,33 @@
+from agent.base_agent import AgentSystem
+from agent.llm import get_response_from_llm
+from baselines.ai_reviewer.agent import neurips_form, reviewer_system_prompt_base
+from utils.common import extract_jsons
+
+
+class TaskAgent(AgentSystem):
+    def forward(self, inputs):
+        base_prompt = neurips_form
+        base_prompt += f"""
+Here is the paper you are asked to review:
+```
+{inputs['paper_text']}
+```"""
+        instruction = reviewer_system_prompt_base + base_prompt
+
+        self.log(f"Input: {repr(instruction)}")
+        response, new_msg_history, _ = get_response_from_llm(
+            msg=instruction,
+            model=self.model,
+            msg_history=[],
+        )
+        self.log(f"Output: {repr(response)}")
+
+        prediction = "None"
+        try:
+            extracted_jsons = extract_jsons(new_msg_history[-1]["text"])
+            prediction = extracted_jsons[-1]["Decision"]
+        except Exception as e:
+            self.log(f"Error extracting prediction: {e}")
+            prediction = "None"
+
+        return prediction, new_msg_history

@@ -10,12 +10,26 @@ import importlib.util
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from pathlib import Path
 import pandas as pd
-from hydra import compose, initialize_config_dir
 from types import ModuleType
 
+from domains._toon_io import read_toon
 
-def get_dataset(domain, subset=""):
+
+def load_dataset_path(dataset_path):
+    suffix = Path(dataset_path).suffix.lower()
+    if suffix == ".csv":
+        return pd.read_csv(dataset_path, dtype=str)
+    if suffix == ".toon":
+        return read_toon(dataset_path)
+    raise ValueError(f"Unsupported dataset suffix for {dataset_path!r}")
+
+
+def get_dataset(domain, subset="", dataset_path=None):
+    if dataset_path:
+        return load_dataset_path(dataset_path)
+
     df = None
     if "imo_" in domain:
         df = pd.read_csv(f"./domains/imo/{domain.split('_')[-1]}bench{subset}.csv", dtype=str)
@@ -23,13 +37,22 @@ def get_dataset(domain, subset=""):
         df = pd.read_csv(f"./domains/{domain}/dataset{subset}.csv", dtype=str)
     return df
 
-def run_agent(TaskAgent, model, row, evals_folder, format_input_dict, question_id_col):
+
+def run_agent(TaskAgent, model, row, evals_folder, format_input_dict, question_id_col, token_log=None):
     question_id = row[question_id_col]
     chat_history_path = os.path.join(evals_folder, f"chat_history_{question_id}.md")
     agent = TaskAgent(model=model, chat_history_file=chat_history_path)
     inputs = format_input_dict(row)
-    prediction, _ = agent.forward(inputs)
-    return prediction
+    if token_log:
+        from agent.llm import clear_token_log_context, set_token_log_context
+
+        set_token_log_context(token_log, question_id)
+    try:
+        prediction, _ = agent.forward(inputs)
+        return prediction
+    finally:
+        if token_log:
+            clear_token_log_context()
 
 
 def load_task_agent(agent_path: str):
@@ -68,6 +91,8 @@ def harness(
     resume_from=None,
     subset="",
     proofs_dname=None,
+    dataset_path=None,
+    token_log=None,
 ):
     # Dynamically import functions based on the domain
     utils_prefix = domain.split("_", 1)[1] + "_" if domain.startswith("imo_") else ""
@@ -93,6 +118,8 @@ def harness(
     # Create output folder
     evals_folder = os.path.join(output_folder, "agent_evals")
     os.makedirs(evals_folder, exist_ok=True)
+    if token_log:
+        os.makedirs(os.path.dirname(os.path.abspath(token_log)), exist_ok=True)
     output_path = os.path.join(output_folder, "predictions.csv")
 
     # Load existing predictions if available
@@ -111,7 +138,7 @@ def harness(
         dataset["Response"] = dataset["prediction"].copy()
         dataset.drop(columns=["prediction"], inplace=True)
     else:
-        dataset = get_dataset(domain=domain, subset=subset)
+        dataset = get_dataset(domain=domain, subset=subset, dataset_path=dataset_path)
     if num_samples > 0:
         dataset = dataset[:num_samples]
 
@@ -138,7 +165,7 @@ def harness(
                     executor.submit(
                         run_agent,
                         TaskAgent, model, row, evals_folder,
-                        format_input_dict, question_id_col,
+                        format_input_dict, question_id_col, token_log,
                     ),
                 )
             )
@@ -216,6 +243,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--proofs_dname", type=str, default="", help="Path to the directory containing proofs to grade (for imo_proof_grading)"
     )
+    parser.add_argument(
+        "--dataset_path",
+        type=str,
+        default=None,
+        help="Override dataset path. Supports .csv and .toon files.",
+    )
+    parser.add_argument(
+        "--token_log",
+        type=str,
+        default=None,
+        help="Optional JSONL path for LLM token usage records.",
+    )
     args = parser.parse_args()
 
     domain = args.domain
@@ -236,10 +275,13 @@ if __name__ == "__main__":
             resume_from=args.resume_from,
             subset=args.subset,
             proofs_dname=args.proofs_dname,
+            dataset_path=args.dataset_path,
+            token_log=args.token_log,
         )
 
     # Balrog game domains
     elif "balrog" in domain:
+        from hydra import compose, initialize_config_dir
         from domains.balrog.eval import harness_balrog
 
         env_name = domain.split("_")[-1]
@@ -271,6 +313,7 @@ if __name__ == "__main__":
 
     # Genesis Robotic Control Domains
     elif "genesis" in domain:
+        from hydra import compose, initialize_config_dir
         from domains.genesis.eval import harness_genesis
 
         env_name = domain.split("_")[-1]

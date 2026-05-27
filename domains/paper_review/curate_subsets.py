@@ -1,3 +1,4 @@
+import argparse
 import os
 import math
 import pandas as pd
@@ -87,15 +88,53 @@ def make_balanced_splits(df, num_samples=100, shuffle_seed=42, prefix=""):
     for name in names:
         splits[name].to_csv(f"./domains/paper_review/{prefix}dataset_filtered_{num_samples}_{name}.csv", index=False)
 
+
+def make_eval_subset(df, n=30, seed=42):
+    df = df[df['outcome'].isin(['accept', 'reject'])].copy()
+
+    accepted_df = df[df['outcome'] == 'accept'].sample(frac=1, random_state=seed)
+    rejected_df = df[df['outcome'] == 'reject'].sample(frac=1, random_state=seed)
+
+    accept_n = n // 2 + n % 2
+    reject_n = n // 2
+    if len(accepted_df) < accept_n or len(rejected_df) < reject_n:
+        raise ValueError(
+            f"Not enough data for {n} rows: need {accept_n} accept and {reject_n} reject"
+        )
+
+    subset = pd.concat(
+        [accepted_df.iloc[:accept_n], rejected_df.iloc[:reject_n]],
+        ignore_index=True,
+    )
+    return subset.sample(frac=1, random_state=seed).reset_index(drop=True)
+
 # ---------------- entrypoint ----------------
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Curate paper_review subsets.")
+    parser.add_argument("--n", type=int, default=100, help="Number of samples")
+    parser.add_argument("--seed", type=int, default=42, help="Shuffle seed")
+    parser.add_argument(
+        "--out",
+        type=str,
+        default=None,
+        help="Optional output CSV for a single deterministic eval subset.",
+    )
+    args = parser.parse_args()
+
     df = get_dataset(domain="paper_review")
-    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+    df = df.sample(frac=1, random_state=args.seed).reset_index(drop=True)
+
+    if args.out:
+        eval_df = make_eval_subset(df, n=args.n, seed=args.seed)
+        os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+        eval_df.to_csv(args.out, index=False)
+        _print_split_stats("eval", eval_df)
+        raise SystemExit(0)
 
     make_balanced_splits(
         df,
-        num_samples=100,   # each of train/val/test will have 100 rows (50 accept, 50 reject)
-        shuffle_seed=42,
+        num_samples=args.n,   # each of train/val/test will have n rows
+        shuffle_seed=args.seed,
         prefix=""
     )
